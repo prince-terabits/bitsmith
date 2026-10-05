@@ -207,16 +207,18 @@ textarea { font: inherit; color: var(--vscode-input-foreground); }
 .thumb img { height: 52px; border-radius: 6px; border: 1px solid var(--border); display: block; }
 .thumb .remove { position: absolute; top: -6px; right: -6px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 50%; min-height: 16px; min-width: 16px; }
 .toolbar, .footer { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
-.pill { background: transparent; color: var(--muted); padding: 2px 6px; min-height: 24px; gap: 4px; font-size: 0.92em; border-radius: 5px; }
+.pill { background: transparent; color: var(--muted); padding: 1px 5px; min-height: 22px; gap: 3px; font-size: 12px; border-radius: 4px; }
+.pill .codicon { font-size: 13px; }
 .pill:hover { background: var(--hover); color: var(--fg); }
-.pill .chev { font-size: 11px; opacity: .7; }
+.pill .chev { display: none; } /* Copilot-style: the label alone reads as a menu */
 .pill.subtle { padding-left: 2px; }
 .pill.danger, .pill.danger .codicon { color: var(--vscode-editorWarning-foreground); }
-.send { min-width: 28px; min-height: 28px; padding: 0; justify-content: center; border-radius: 7px; background: var(--accent); color: var(--accent-fg); }
+.send { min-width: 24px; min-height: 24px; padding: 0; justify-content: center; border-radius: 5px; background: var(--accent); color: var(--accent-fg); }
+.box:has(textarea:placeholder-shown) .send:not(.stop) { background: transparent; color: var(--muted); } /* nothing typed: a quiet arrow */
 .send:hover { background: var(--vscode-button-hoverBackground); }
 .send.stop { background: var(--vscode-button-secondaryBackground); color: var(--fg); }
 .footer { padding: 0 2px; }
-.hint { font-size: 0.85em; }
+.hint { font-size: 11px; }
 
 /* menus */
 .menu { position: fixed; z-index: 50; min-width: 220px; max-width: min(340px, calc(100vw - 12px)); padding: 4px; border-radius: var(--radius); border: 1px solid var(--vscode-menu-border, var(--border)); background: var(--vscode-menu-background, var(--surface)); color: var(--vscode-menu-foreground, var(--fg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); animation: fadein .12s ease-out; }
@@ -335,7 +337,7 @@ body.vscode-light .tk-t, body.vscode-high-contrast-light .tk-t { color: #800000;
 .queued .grow { min-width: 0; }
 
 /* context meter: a small ring in the toolbar */
-.context-meter { background: transparent; color: var(--muted); gap: 5px; padding: 2px 6px; min-height: 24px; font-size: 0.85em; border-radius: 5px; font-variant-numeric: tabular-nums; }
+.context-meter { background: transparent; color: var(--muted); gap: 5px; padding: 1px 5px; min-height: 22px; font-size: 11px; border-radius: 5px; font-variant-numeric: tabular-nums; }
 .context-meter:hover { background: var(--hover); color: var(--fg); }
 .context-meter .ring { width: 12px; height: 12px; border-radius: 50%; flex: none;
   background: conic-gradient(var(--ring, var(--vscode-textLink-foreground)) calc(var(--pct) * 1%), var(--border) 0);

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.3
+
+- Up / Down in the chat box recalls your earlier prompts, like a shell. Up works from the first line and Down
+  from the last, so multi-line edits are unaffected; Down past the newest brings back what you were typing.
+
+## 1.6.2
+
+- A smaller, quieter chat box toolbar, like Copilot's: compact Mode / Model / Effort / Approvals labels without
+  chevrons or extra icons, and the send arrow stays muted until you type.
+
 ## 1.6.1
 
 - Bitsmith tabs open in a split beside your code, like Claude Code, instead of covering the file you're on. More

@@ -175,10 +175,10 @@ function renderToolbar() {
   modeBtn.replaceChildren(icon(mode.icon), mode.label, icon("chevron-down", "chev"));
   const model = currentModel();
   const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
-  modelBtn.replaceChildren(icon("sparkle"), name, icon("chevron-down", "chev"));
+  modelBtn.replaceChildren(name, icon("chevron-down", "chev"));
   const levels = model.supportedEffortLevels || [];
   effortBtn.classList.toggle("hidden", !levels.length && !S.effort);
-  effortBtn.replaceChildren(icon("dashboard"), EFFORT_LABEL[S.effort] || S.effort, icon("chevron-down", "chev"));
+  effortBtn.replaceChildren(EFFORT_LABEL[S.effort] || S.effort, icon("chevron-down", "chev"));
   const policy = POLICIES.find((p) => p.value === S.policy) || POLICIES[0];
   policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
   policyBtn.classList.toggle("danger", S.policy === "bypass");
@@ -332,7 +332,23 @@ input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { input.value = ""; return renderSlash(); }
   }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+  // shell-style recall: Up on the first line / Down on the last line walks past prompts
+  const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
+  const down = e.key === "ArrowDown" && !input.value.slice(input.selectionEnd).includes("\n");
+  if ((up || down) && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    const hist = vscode.getState()?.history || [];
+    if (histAt < 0) { histAt = hist.length; histDraft = input.value; }
+    const next = histAt + (up ? -1 : 1);
+    if (next < 0 || next > hist.length) return;
+    e.preventDefault();
+    histAt = next;
+    input.value = next === hist.length ? histDraft : hist[next];
+    input.setSelectionRange(input.value.length, input.value.length);
+    autosize();
+  }
 });
+let histAt = -1, histDraft = "";
+input.addEventListener("input", () => { histAt = -1; });
 input.addEventListener("paste", (e) => {
   for (const item of e.clipboardData.items) {
     if (!item.type.startsWith("image/")) continue;
@@ -821,6 +837,11 @@ function submit() {
   const payload = { text: text || "See the attached image.", images: S.images, items: S.items, useActive: !!a, chips: chipsShown };
   if (S.busy) { cur.queue.push(payload); renderQueue(); } // sent when this reply ends, like typing ahead in the terminal
   else dispatch(payload);
+  if (text) {
+    const hist = (vscode.getState()?.history || []).filter((t) => t !== text).concat(text).slice(-100);
+    vscode.setState({ ...vscode.getState(), history: hist });
+  }
+  histAt = -1;
   input.value = "";
   S.items = [];
   S.images = [];
