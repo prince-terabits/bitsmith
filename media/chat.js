@@ -336,8 +336,14 @@ input.addEventListener("keydown", (e) => {
   const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
   const down = e.key === "ArrowDown" && !input.value.slice(input.selectionEnd).includes("\n");
   if ((up || down) && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
-    const hist = vscode.getState()?.history || [];
-    if (histAt < 0) { histAt = hist.length; histDraft = input.value; }
+    if (histAt < 0) {
+      // saved prompts, then this chat's own messages (covers chats reopened from history), newest last
+      const own = [...(shown?.el.querySelectorAll(".user-text") || [])].map((x) => x.textContent.trim()).filter((t) => t && t !== "See the attached image.");
+      const all = [...(vscode.getState()?.history || []), ...own];
+      histList = all.filter((t, i) => all.lastIndexOf(t) === i);
+      histAt = histList.length; histDraft = input.value;
+    }
+    const hist = histList;
     const next = histAt + (up ? -1 : 1);
     if (next < 0 || next > hist.length) return;
     e.preventDefault();
@@ -347,7 +353,7 @@ input.addEventListener("keydown", (e) => {
     autosize();
   }
 });
-let histAt = -1, histDraft = "";
+let histAt = -1, histDraft = "", histList = [];
 input.addEventListener("input", () => { histAt = -1; });
 input.addEventListener("paste", (e) => {
   for (const item of e.clipboardData.items) {
@@ -1028,6 +1034,7 @@ function inChat(key, fn) {
 }
 
 function showChat(key, tell) {
+  histAt = -1; // recall restarts from the newly shown chat
   const c = chats.get(key) || makeChat(key);
   enter(c);
   shown = c;

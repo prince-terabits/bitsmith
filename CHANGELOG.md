@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.4
+
+- Up / Down recall also covers the messages of the chat on screen, so it works in chats reopened from history.
+
 ## 1.6.3
 
 - Up / Down in the chat box recalls your earlier prompts, like a shell. Up works from the first line and Down
