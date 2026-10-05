@@ -7,6 +7,7 @@ const os = require("os");
 const { EditTracker, diffLines, lines, stats } = require("./edits");
 
 const PROPOSED = "bitsmith-proposed";
+const USAGE_POLL = 2 * 60 * 1000; // plan usage refresh while the window is focused
 const proposed = new Map(); // proposed-file uri -> content, right side of an "ask first" diff
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
@@ -822,6 +823,7 @@ class ChatProvider {
       case "restore": return c.restore(m.checkpoint);
       case "editMessage": return c.restore(m.checkpoint, { edit: m.text });
       case "redo": return c.redo();
+      case "refreshUsage": return this.fetchUsage(true);
       case "openUsagePage": return vscode.env.openExternal(vscode.Uri.parse("https://claude.ai/settings/usage"));
     }
   }
@@ -945,7 +947,39 @@ class ChatProvider {
     return out.length ? `<context>\n${out.join("\n")}\n</context>\n\n${text}` : text;
   }
 
-  // ---- plan usage (from the CLI's rate_limit_event; no extra requests) ----
+  // ---- plan usage: the CLI's rate_limit_event while chatting, plus a poll of the account's usage endpoint ----
+  // Other Claude sessions (terminal, other windows) use the same limits, so the reading from our last message goes stale.
+
+  async fetchUsage(force = false) {
+    if (this.fetchingUsage || (!force && this.usage?.updated > Date.now() - USAGE_POLL / 2)) return;
+    this.fetchingUsage = true;
+    try {
+      const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+      const auth = JSON.parse(fs.readFileSync(path.join(dir, ".credentials.json"), "utf8")).claudeAiOauth;
+      if (!auth?.accessToken || auth.expiresAt < Date.now()) return; // the CLI refreshes it on its next run
+      const r = await fetch("https://api.anthropic.com/api/oauth/usage", {
+        headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-beta": "oauth-2025-04-20" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return;
+      const j = await r.json();
+      const win = (x) => x && { used: (x.utilization ?? 0) / 100, resetsAt: x.resets_at ? Date.parse(x.resets_at) / 1000 : null };
+      const session = win(j.five_hour), weekly = win(j.seven_day);
+      if (!session && !weekly) return;
+      const full = [session, weekly].filter((x) => x?.used >= 1);
+      this.usage = {
+        ...this.usage, session, weekly,
+        status: full.length ? "rejected" : "allowed",
+        resetsAt: full.length ? Math.max(...full.map((x) => x.resetsAt || 0)) : null,
+        usingOverage: this.usage?.usingOverage && !!j.extra_usage?.is_enabled,
+        overage: j.extra_usage ? (j.extra_usage.is_enabled ? this.usage?.overage || "allowed" : "rejected") : this.usage?.overage,
+        updated: Date.now(),
+      };
+      this.state.update("usage", this.usage);
+      this.updateUsage();
+    } catch {} // offline, no credentials file (e.g. macOS keychain): keep the last reading
+    finally { this.fetchingUsage = false; }
+  }
 
   setUsage(info) {
     const w = info.unifiedWindows || {};
@@ -983,6 +1017,7 @@ class ChatProvider {
   }
 
   showUsage() {
+    this.fetchUsage();
     if (this.view) { this.view.show?.(true); this.post({ type: "showUsage" }); }
     else this.usageRequested = true; // panel not open yet: show the card once it loads
     vscode.commands.executeCommand("bitsmith.chat.focus");
@@ -1579,6 +1614,11 @@ function activate(context) {
   provider.statusItem = status;
   provider.updateUsage();
   status.show();
+  provider.fetchUsage();
+  const poll = setInterval(() => vscode.window.state?.focused !== false && provider.fetchUsage(), USAGE_POLL); // only while this window is in front
+  poll.unref?.();
+  context.subscriptions.push({ dispose: () => clearInterval(poll) });
+  if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => s.focused && provider.fetchUsage()));
   context.subscriptions.push(status, vscode.commands.registerCommand("bitsmith.showUsage", () => provider.showUsage()));
   provider.edits.register(context);
   let timer;

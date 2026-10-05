@@ -955,8 +955,10 @@ function renderUsage() {
       h("button", { class: "primary small", onclick: () => send({ type: "openUsagePage" }) }, "Manage"),
       h("button", { class: "icon-btn", title: "Close", onclick: () => usageCard.classList.add("hidden") }, icon("close"))),
     ...rows,
-    h("div", { class: "usage-foot muted small" }, icon("info"), u?.updated ? `Updated ${ago(u.updated)} · refreshes with each message` : "Refreshes with each message"));
+    h("div", { class: "usage-foot muted small" }, icon("info"), h("span", { class: "grow" }, u?.updated ? `Updated ${ago(u.updated)} · refreshes every 2 min` : "Refreshes every 2 min"),
+      h("button", { class: "icon-btn", title: "Refresh now", onclick: () => send({ type: "refreshUsage" }) }, icon("refresh"))));
 }
+setInterval(() => { if (!usageCard.classList.contains("hidden")) renderUsage(); }, 30000); // keep "Updated … ago" honest while open
 
 // ---------- chats: one pane each, switched with the tab strip ----------
 function makeChat(key) {

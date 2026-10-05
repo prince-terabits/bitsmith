@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.5
+
+- Plan usage stays current: it refreshes from your Claude account every 2 minutes while the window is focused,
+  when the window regains focus and when you open the card, so usage from other Claude sessions shows up.
+  The card has a refresh button, and "Updated … ago" keeps ticking while it's open.
+
 ## 1.5.4
 
 - README: logo, badges, screenshots and a highlights table. Screenshots live in `docs/`; build with

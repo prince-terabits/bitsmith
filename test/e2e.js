@@ -46,6 +46,7 @@ const vscode = {
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
 let provider, tree, statusItem;
+global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
 const ext = require(path.join(__dirname, "..", "extension.js"));
@@ -219,6 +220,30 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     c.tools.delete("t1");
     for (const d of ["docs", "x", "y"]) fs.rmSync(path.join(cwd, d), { recursive: true });
     console.log("open file from reply ok");
+
+    // plan usage refreshes from the account endpoint, not only when a message comes back
+    const cfg = fs.mkdtempSync(path.join(require("os").tmpdir(), "bs-cfg-")), noFetch = global.fetch, oldDir = process.env.CLAUDE_CONFIG_DIR, calls = [];
+    fs.writeFileSync(path.join(cfg, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3600e3 } }));
+    process.env.CLAUDE_CONFIG_DIR = cfg;
+    global.fetch = async (url, o) => { calls.push([url, o.headers.Authorization]); return { ok: true, json: async () => ({
+      five_hour: { utilization: 81, resets_at: "2026-10-05T09:20:00+00:00" }, seven_day: { utilization: 100, resets_at: "2026-10-09T19:00:00+00:00" }, extra_usage: { is_enabled: false } }) }; };
+    await provider.fetchUsage(true);
+    await provider.fetchUsage(); // just updated: no second request
+    assert.deepStrictEqual(calls, [["https://api.anthropic.com/api/oauth/usage", "Bearer tok"]]);
+    assert.strictEqual(provider.usage.session.used, 0.81);
+    assert.strictEqual(provider.usage.session.resetsAt, Date.parse("2026-10-05T09:20:00Z") / 1000);
+    assert.strictEqual(provider.usage.status, "rejected");
+    assert.strictEqual(provider.usage.overage, "rejected");
+    assert.match(statusItem.text, / 100%$/);
+    global.fetch = async () => { throw new Error("offline"); };
+    const before = provider.usage;
+    await provider.fetchUsage(true);
+    assert.strictEqual(provider.usage, before); // offline keeps the last reading
+    provider.usage = null; provider.updateUsage();
+    global.fetch = noFetch;
+    if (oldDir == null) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldDir;
+    fs.rmSync(cfg, { recursive: true });
+    console.log("usage refresh ok");
   }
 
   // a background chat that finishes (or needs approval) raises a toast; the chat on screen doesn't

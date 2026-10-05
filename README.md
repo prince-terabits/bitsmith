@@ -112,7 +112,7 @@ Then reload the window.
   - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/`, `.vscode/`, `.husky/`, `.devcontainer/` or `.github/workflows/`, a shell startup file such as `.bashrc`, and any file outside the open folder (symlinks are followed) apart from scratch files in the temp directory. The card says why it asked, and "Allow all edits" doesn't cover these.
   - Both Bitsmith settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
 - **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
-- **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details.
+- **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details. It refreshes every 2 minutes while VS Code is focused, so usage from other Claude sessions shows up too.
 
 ### Watching Claude work
 
