@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {

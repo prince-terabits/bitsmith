@@ -1,6 +1,26 @@
-# Bitsmith
+<p align="center">
+  <img src="media/logo.png" width="96" alt="Bitsmith logo">
+</p>
 
-A Copilot-style coding agent for VS Code's secondary sidebar. It is powered by your local **Claude Code CLI** and its login.
+<h1 align="center">Bitsmith</h1>
+
+<p align="center">
+  <b>Claude Code in your VS Code sidebar, Copilot-style.</b><br>
+  Chat, watch every step, approve what matters, and keep or undo each change.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/VS%20Code-1.94%2B-007ACC?logo=visualstudiocode&logoColor=white" alt="VS Code 1.94+">
+  <img src="https://img.shields.io/badge/powered%20by-Claude%20Code-D97757?logo=anthropic&logoColor=white" alt="Powered by Claude Code">
+  <img src="https://img.shields.io/badge/dependencies-none-2ea043" alt="No dependencies">
+  <img src="https://img.shields.io/badge/use-personal-6e7681" alt="Personal use">
+</p>
+
+<p align="center">
+  <img src="docs/chat.png" width="460" alt="A Bitsmith chat: steps, a code answer, and the changed files ready to keep or undo">
+</p>
+
+Bitsmith is a coding agent for VS Code's secondary sidebar, powered by your local **Claude Code CLI** and its login.
 
 Bitsmith has no API key of its own and makes no direct API calls. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Bitsmith shows up in `claude --resume`, and the other way round.
 
@@ -18,7 +38,7 @@ Bitsmith has no API key of its own and makes no direct API calls. Everything run
 ```bash
 git clone https://github.com/prince-terabits/bitsmith.git
 cd bitsmith
-npx --yes @vscode/vsce package --allow-missing-repository --skip-license
+npx --yes @vscode/vsce package --allow-missing-repository --skip-license --no-rewrite-relative-links
 code --install-extension bitsmith-*.vsix --force
 ```
 
@@ -30,11 +50,35 @@ If `claude` is not on your `PATH`, set **Settings → Bitsmith → Claude Path**
 
 ```bash
 cd bitsmith && git pull
-rm -f *.vsix && npx --yes @vscode/vsce package --allow-missing-repository --skip-license
+rm -f *.vsix && npx --yes @vscode/vsce package --allow-missing-repository --skip-license --no-rewrite-relative-links
 code --install-extension bitsmith-*.vsix --force
 ```
 
 Then reload the window.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/hero.png" alt="Start screen with recent chats"><br><sub><b>Start screen:</b> recent chats and the current file ready to attach</sub></td>
+    <td align="center" width="50%"><img src="docs/approval.png" alt="Command approval card and todo list"><br><sub><b>Approvals:</b> you decide which commands run; todos track the plan</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/background.png" alt="Background agents and a running server"><br><sub><b>Background work:</b> agents and servers keep running, with their steps nested</sub></td>
+    <td align="center"><img src="docs/usage.png" alt="Plan usage card"><br><sub><b>Usage:</b> your 5-hour and weekly Claude limits at a glance</sub></td>
+  </tr>
+</table>
+
+## Highlights
+
+| | |
+|---|---|
+| 💬 **Several chats at once** | Tabs, a message queue, and chats that come back after a reload |
+| 👀 **Every step visible** | Reads, searches, edits with +/− counts, commands with their full output, sub-agents nested |
+| ✅ **You stay in control** | Approve commands, review or auto-apply edits, Keep or Undo per change, restore any checkpoint |
+| 🧵 **Background tasks** | Servers and agents keep running; Claude follows up when they finish |
+| 🧠 **Same Claude as the terminal** | Your sessions, skills, hooks, MCP servers and `CLAUDE.md`, no API key |
+| ✨ **Git help** | Commit messages from your diff, and Restore also undoes what commands changed |
 
 ## Features
 
