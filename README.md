@@ -110,7 +110,7 @@ Then reload the window.
   - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
   - *Bypass*: nothing asks.
   - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/`, `.vscode/`, `.husky/`, `.devcontainer/` or `.github/workflows/`, a shell startup file such as `.bashrc`, and any file outside the open folder (symlinks are followed) apart from scratch files in the temp directory. The card says why it asked, and "Allow all edits" doesn't cover these.
-  - Both Bitsmith settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
+  - Bitsmith settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
 - **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
 - **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details. It refreshes every 2 minutes while VS Code is focused, so usage from other Claude sessions shows up too.
 
@@ -136,6 +136,10 @@ Then reload the window.
 - **Search** by title, or by message text once you type 3 or more characters.
 - **Rename** or **delete** a chat. Deleting moves the chat's files to the system trash.
 
+### Browser
+
+Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. It runs in a throwaway profile that's deleted when the chat ends. Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
+
 ### Git
 
 - **Write Commit Message with Bitsmith** (the ✨ button in Source Control): writes a message from your staged changes (or unstaged ones if nothing is staged) using Haiku, and puts it in the commit box.
@@ -158,8 +162,9 @@ Then reload the window.
 |---|---|---|
 | `bitsmith.claudePath` | `claude` | Path to the Claude Code CLI |
 | `bitsmith.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
+| `bitsmith.browser` | `off` | Browser tools for Claude: `off`, `window` (a visible Chrome) or `headless` |
 
-Both are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
+All three are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
 
 ## Known limits
 

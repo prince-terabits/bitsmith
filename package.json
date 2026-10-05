@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -189,6 +189,14 @@
     "configuration": {
       "title": "Bitsmith",
       "properties": {
+        "bitsmith.browser": {
+          "type": "string",
+          "default": "off",
+          "scope": "machine",
+          "enum": ["off", "window", "headless"],
+          "enumDescriptions": ["No browser tools", "Give Claude a browser in its own Chrome window you can watch", "Give Claude a browser without a visible window"],
+          "description": "Bitsmith's own browser tools: Claude can open pages, read them, click, type, take screenshots and check the console in a separate Chrome with a throwaway profile. Applies to chats started after the change."
+        },
         "bitsmith.claudePath": {
           "type": "string",
           "default": "claude",

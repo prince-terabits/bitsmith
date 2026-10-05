@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.6
+
+- Browser tools (setting `bitsmith.browser`: `off`, `window` or `headless`): Claude can open pages in its own Chrome,
+  read them, click, type, press keys, take screenshots and read the console. A small built-in MCP server over the
+  Chrome DevTools Protocol, no new dependencies; a throwaway profile is removed when the chat ends. On Wayland
+  the window uses X11, and the VS Code snap's library paths are kept away from Chrome.
+
 ## 1.5.5
 
 - Plan usage stays current: it refreshes from your Claude account every 2 minutes while the window is focused,

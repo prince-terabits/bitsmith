@@ -35,6 +35,12 @@ class Claude {
     if (effort) args.push("--effort", effort);
     if (resume) args.push("--resume", resume);
     if (resume && resumeAt) args.push("--resume-session-at", resumeAt, "--fork-session"); // rewind: continue from that reply in a new branch
+    const browser = cfg.get("browser");
+    if (browser && browser !== "off") { // Bitsmith's own browser tools (browser-mcp.js), run on VS Code's Node, which has WebSocket
+      const server = { command: process.execPath, args: [path.join(__dirname, "browser-mcp.js")], env: { ELECTRON_RUN_AS_NODE: "1", BITSMITH_BROWSER: browser } };
+      args.push("--mcp-config", JSON.stringify({ mcpServers: { browser: server } }),
+        "--allowedTools", "mcp__browser__browser_snapshot,mcp__browser__browser_screenshot,mcp__browser__browser_console"); // looking never asks; acting does
+    }
     this.effort = effort;
     this.waiting = new Map();
     this.stderr = "";
@@ -1258,6 +1264,10 @@ function approvalText(name, input = {}, d) {
     case "WebFetch": return { question: "Fetch this page?", sub: input.prompt ? `To ${input.prompt.charAt(0).toLowerCase()}${input.prompt.slice(1, 120)}` : "", detail: full(input.url) };
     case "WebSearch": return { question: "Search the web?", sub: "", detail: full(input.query) };
     case "Task": case "Agent": return { question: "Start a sub-agent?", sub: full(input.subagent_type), detail: full(input.description) };
+    case "mcp__browser__browser_open": return { question: "Open this page in the browser?", sub: "", detail: full(input.url) };
+    case "mcp__browser__browser_click": return { question: "Click in the browser?", sub: "", detail: d.detail };
+    case "mcp__browser__browser_type": return { question: "Type in the browser?", sub: input.submit ? "Then press Enter" : "", detail: d.detail };
+    case "mcp__browser__browser_press": return { question: "Press a key in the browser?", sub: "", detail: d.detail };
     default:
       if (name.startsWith("mcp__")) return { question: `Use ${name.replace(/^mcp__/, "").replace(/__/g, " › ")}?`, sub: "", detail: d.detail };
       return { question: `Allow ${name}?`, sub: "", detail: d.detail };
@@ -1388,6 +1398,13 @@ function describeTool(name, input = {}, rel = (f) => f) {
     case "Skill": return { ...base, icon: "sparkle", title: "Used skill", detail: short(input.skill || input.command, 60) };
     case "ExitPlanMode": return { ...base, icon: "list-ordered", title: "Proposed a plan", detail: "" };
     case "AskUserQuestion": return { ...base, icon: "question", title: "Asked a question", detail: "" };
+    case "mcp__browser__browser_open": return { ...base, icon: "globe", title: "Opened", detail: short(input.url, 90), full: input.url || "" };
+    case "mcp__browser__browser_snapshot": return { ...base, icon: "eye", title: "Read the page", detail: "" };
+    case "mcp__browser__browser_click": return { ...base, icon: "target", title: "Clicked", detail: `[${input.ref}]` };
+    case "mcp__browser__browser_type": return { ...base, icon: "keyboard", title: input.submit ? "Typed and submitted" : "Typed", detail: `"${short(input.text, 50)}" into [${input.ref}]` };
+    case "mcp__browser__browser_press": return { ...base, icon: "keyboard", title: "Pressed", detail: input.key || "" };
+    case "mcp__browser__browser_screenshot": return { ...base, icon: "device-camera", title: "Took a screenshot", detail: "" };
+    case "mcp__browser__browser_console": return { ...base, icon: "debug-console", title: "Checked the console", detail: "" };
     default: return { ...base, icon: name.startsWith("mcp__") ? "plug" : "tools", title: name.replace(/^mcp__/, "").replace(/__/g, " › "), detail: short(file ? rel(file) : input.command || input.query || input.description || "", 80) };
   }
 }
