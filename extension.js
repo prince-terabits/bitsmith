@@ -894,6 +894,7 @@ class ChatProvider {
 
   // A fresh chat is reused; otherwise the current one keeps running in its own tab.
   newChat() {
+    this.postSessions(); // the empty chat lists recent chats, including ones from this window
     if (this.active.fresh) return this.active.reset();
     const c = this.createChat();
     this.post({ type: "openChat", chat: c.key });
@@ -944,6 +945,7 @@ class ChatProvider {
 
   chatChanged(c) {
     this.saveTabs();
+    this.postSessions(); // a chat got its title: it now belongs in Recent chats
     if (c.panel) c.panel.title = c.title || "Bitsmith";
     this.post({ type: "chatTitle", chat: c.key, title: c.title });
     if (c === this.active && this.view) this.view.description = c.title || undefined;

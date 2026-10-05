@@ -117,6 +117,19 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   provider.activeFile = realActive;
   console.log("context dedupe ok");
 
+  // a chat started in this window shows in Recent chats on New Chat, without a reload
+  {
+    const id = "99999999-2222-3333-4444-555555555555", dir = provider.sessionDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id + ".jsonl"), JSON.stringify({ type: "user", message: { role: "user", content: "fresh from this window" } }) + "\n");
+    const st = posts.length;
+    provider.newChat();
+    const list = posts.slice(st).filter((m) => m.type === "sessions").pop();
+    assert(list?.items.some((s) => s.id === id && s.title === "fresh from this window"), "new chat listed");
+    fs.rmSync(path.join(dir, id + ".jsonl"));
+    console.log("recent chats refresh ok");
+  }
+
   // delete chat: transcript and its per-session folders go away; bad ids are refused
   {
     const id = "11111111-2222-3333-4444-555555555555";

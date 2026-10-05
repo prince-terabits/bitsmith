@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.8
+
+- Recent chats on the empty chat screen now include chats started in this window. The list was only read when the
+  window opened (and after a rename or delete), so new chats seemed not to be saved until a reload.
+
 ## 1.5.7
 
 - Live view of Claude's browser: a "Claude's Browser" tab streams the page and passes your clicks, scrolling and
