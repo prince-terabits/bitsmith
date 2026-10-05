@@ -787,7 +787,7 @@ class ChatProvider {
       case "renameChat": return c.sessionId && this.renameSession(c.sessionId);
       case "send": return c.send(m);
       case "stop": return c.interrupt();
-      case "open": return openFile(this.abs(m.file), m.line);
+      case "open": return this.openPath(c, m.file, m.line);
       case "openImage": return openImage(m.mediaType, m.data);
       case "permission": return c.answer(m);
       case "showProposed": return c.showProposed(m.id);
@@ -815,6 +815,22 @@ class ChatProvider {
 
   abs(file) {
     return path.isAbsolute(file) ? file : path.join(this.folder || "", file);
+  }
+
+  // A file named in a reply. Replies often give a path relative to where Claude was working, or just a name,
+  // so when it isn't at the folder root, look for it: files this chat touched first, then shortest path.
+  async openPath(c, file, line) {
+    if (!file) return;
+    const direct = this.abs(file.replace(/^~(?=\/|$)/, os.homedir()));
+    if (fs.existsSync(direct)) return openFile(direct, line);
+    const rel = file.replace(/^(\.{1,2}\/)+/, "");
+    const found = (await vscode.workspace.findFiles(`**/${rel}`, EXCLUDE, 50)).map((u) => u.fsPath);
+    if (!found.length) return vscode.window.showInformationMessage(`Bitsmith couldn't find ${file} in this workspace.`);
+    const touched = new Set([...(c?.tools.values() || [])].map((t) => t.input?.file_path).filter(Boolean));
+    found.sort((a, b) => touched.has(b) - touched.has(a) || a.length - b.length);
+    if (found.length === 1 || touched.has(found[0])) return openFile(found[0], line);
+    const pick = await vscode.window.showQuickPick(found.map((f) => ({ label: path.basename(f), description: this.rel(f), f })), { placeHolder: `Several files match ${file}` });
+    if (pick) openFile(pick.f, line);
   }
 
   onInit(r) {

@@ -191,6 +191,25 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const t = await c.shellTargets([{ shell: [{ root: cwd, a: "0123456789abcdef0123456789abcdef01234567", changed: ["a.txt"], created: ["made.txt"] }] }]);
     assert.deepStrictEqual([...t], [[path.join(cwd, "made.txt"), null]], "only the created file is undone");
     console.log("pruned snapshot ok");
+
+    // clicking a file named in a reply finds it even when the path isn't from the folder root
+    for (const f of ["docs/deep/notes.md", "x/package.json", "y/z/package.json"]) { fs.mkdirSync(path.dirname(path.join(cwd, f)), { recursive: true }); fs.writeFileSync(path.join(cwd, f), "{}"); }
+    const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+    const realFind = vscode.workspace.findFiles, opened = [], picks = [];
+    vscode.workspace.findFiles = async (glob) => walk(cwd).filter((f) => f.endsWith("/" + glob.slice(3))).map((f) => vscode.Uri.file(f));
+    vscode.window.showTextDocument = async (u) => opened.push(u.fsPath);
+    vscode.window.showQuickPick = async (items) => { picks.push(items.map((i) => i.description)); return items[0]; };
+    await provider.openPath(c, "notes.md");
+    await provider.openPath(c, "deep/notes.md");
+    await provider.openPath(c, "package.json"); // two match: ask, shortest first
+    c.tools.set("t1", { name: "Edit", input: { file_path: path.join(cwd, "y/z/package.json") } });
+    await provider.openPath(c, "package.json"); // the one this chat edited wins
+    assert.deepStrictEqual(opened.map((f) => path.relative(cwd, f)), ["docs/deep/notes.md", "docs/deep/notes.md", "x/package.json", "y/z/package.json"]);
+    assert.deepStrictEqual(picks, [["x/package.json", "y/z/package.json"]]);
+    vscode.workspace.findFiles = realFind;
+    c.tools.delete("t1");
+    for (const d of ["docs", "x", "y"]) fs.rmSync(path.join(cwd, d), { recursive: true });
+    console.log("open file from reply ok");
   }
 
   // a background chat that finishes (or needs approval) raises a toast; the chat on screen doesn't
