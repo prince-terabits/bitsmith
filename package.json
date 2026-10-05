@@ -12,6 +12,12 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Bitsmith runs the Claude Code CLI in the open folder, so it stays off until you trust it."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "secondarySidebar": [
@@ -184,15 +190,15 @@
       "title": "Bitsmith",
       "properties": {
         "bitsmith.claudePath": {
-          "scope": "machine",
           "type": "string",
           "default": "claude",
-          "description": "Path to the Claude Code CLI."
+          "scope": "machine",
+          "description": "Path to the Claude Code CLI. Machine-scoped: a workspace cannot override which binary is launched."
         },
         "bitsmith.defaultPolicy": {
-          "scope": "machine",
           "type": "string",
           "default": "review",
+          "scope": "machine",
           "enum": [
             "review",
             "ask",

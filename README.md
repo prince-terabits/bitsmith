@@ -109,7 +109,7 @@ Then reload the window.
   - *Review* (default): edits are applied at once and you keep or undo them afterwards; commands ask first.
   - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
   - *Bypass*: nothing asks.
-  - In *Review* and *Ask*, an edit **always** asks first when the file is outside this folder (symlinks included) or can run commands later: `.git/`, `.vscode/`, `.claude/`, `.husky/`, `.devcontainer/`, `.github/workflows/`. "Allow all edits" doesn't cover these.
+  - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/`, `.vscode/`, `.husky/`, `.devcontainer/` or `.github/workflows/`, a shell startup file such as `.bashrc`, and any file outside the open folder (symlinks are followed) apart from scratch files in the temp directory. The card says why it asked, and "Allow all edits" doesn't cover these.
   - Both Bitsmith settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
 - **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
 - **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details.
@@ -158,6 +158,8 @@ Then reload the window.
 |---|---|---|
 | `bitsmith.claudePath` | `claude` | Path to the Claude Code CLI |
 | `bitsmith.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
+
+Both are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
 
 ## Known limits
 

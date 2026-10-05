@@ -61,6 +61,15 @@ const parsed = ext.parseUserText("<context>\nCurrent file: src/x.ts (lines 3-5 s
 assert.strictEqual(parsed.text, "fix it");
 assert.deepStrictEqual(parsed.chips.map((c) => c.kind + ":" + c.rel), ["file:src/x.ts", "folder:src/lib", "file:a.txt"]);
 assert.strictEqual(ext.describeTool("Grep", { pattern: "foo" }).title, "Searched for");
+// Edits that can run commands later always need approval; ordinary files in the folder (and temp scratch) don't.
+assert.strictEqual(ext.riskyEdit(path.join(cwd, "src/app.js"), true), false);
+assert.strictEqual(ext.riskyEdit(path.join(require("os").tmpdir(), "scratch.py"), false), false);
+assert.strictEqual(ext.riskyEdit(path.join(cwd, ".vscode/tasks.json"), true), true);
+assert.strictEqual(ext.riskyEdit(path.join(cwd, ".git/hooks/pre-commit"), true), true);
+assert.strictEqual(ext.riskyEdit(path.join(cwd, ".claude/settings.json"), true), true);
+assert.strictEqual(ext.riskyEdit(path.join(require("os").homedir(), ".bashrc"), false), true);
+assert.strictEqual(ext.riskyEdit(path.join(require("os").homedir(), "notes.txt"), false), true); // outside the workspace
+assert.strictEqual(ext.riskyEdit(path.join(cwd, ".gitignore"), true), false); // not inside .git/
 console.log("pure checks ok");
 
 // ---------- live checks ----------

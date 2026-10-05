@@ -9,10 +9,20 @@ const { EditTracker, diffLines, lines, stats } = require("./edits");
 const PROPOSED = "bitsmith-proposed";
 const proposed = new Map(); // proposed-file uri -> content, right side of an "ask first" diff
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
-// Edits here can make commands run later without any prompt (git hooks, editor tasks, Claude hooks), so they always ask
-const RUNS_LATER = /(^|[\\/])(\.git|\.vscode|\.claude|\.husky|\.devcontainer|\.github[\\/]workflows)([\\/]|$)/;
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
+
+// Files that make something else run commands later: git/Claude/VS Code config and hooks, and shell startup files.
+// Writing one of these is really "run a command", so it asks whatever the policy says, and so does any write
+// outside the workspace (scratch files in the temp dir excepted).
+const RUN_DIRS = ["/.git/", "/.claude/", "/.vscode/", "/.husky/", "/.devcontainer/", "/.github/workflows/"];
+const RUN_FILES = new Set([".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", "config.fish"]);
+const fwd = (p) => path.resolve(p).replace(/\\/g, "/");
+function riskyEdit(file, inFolder) {
+  const p = fwd(file);
+  if (RUN_FILES.has(path.basename(p)) || RUN_DIRS.some((d) => p.includes(d))) return true;
+  return !inFolder && !p.startsWith(fwd(os.tmpdir()) + "/");
+}
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
@@ -450,7 +460,7 @@ class Chat {
     }
     if (EDIT_TOOLS.has(req.tool_name)) {
       this.snapshot(file);
-      const risk = policy !== "bypass" && this.p.editRisk(file);
+      const risk = this.p.editRisk(file); // "commands ask first" has to hold for edits that run commands, whatever the policy
       if (!risk && (policy !== "ask" || this.allowEdits)) return allow();
       let diff = null;
       const after = applyEdit(req.tool_name, req.input);
@@ -460,7 +470,9 @@ class Chat {
       }
       this.pending.set(id, { req, diff });
       this.p.notify(this, "needs your approval");
-      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, detail: this.rel(file), hasDiff: !!diff, risk: risk || undefined });
+      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, hasDiff: !!diff,
+        detail: risk && !this.p.inFolder(file) ? file : this.rel(file), // outside the folder, show where it really goes
+        risk: risk || undefined });
       if (diff && this.p.active === this) this.showProposed(id);
       return;
     }
@@ -647,14 +659,15 @@ class ChatProvider {
     return !!this.folder && path.resolve(file).startsWith(this.folder + path.sep);
   }
 
-  // Why an edit must be approved even when edits normally apply on their own, or "" when it's an ordinary file.
+  // Why an edit must be approved whatever the policy (see riskyEdit), or "" when it's an ordinary file.
   // Real paths, so a symlink inside the folder can't point at ~/.bashrc.
   editRisk(file) {
+    if (!file) return "";
     const folder = this.folder && realPath(this.folder);
-    const real = realPath(path.resolve(this.folder || os.homedir(), file || ""));
-    if (!folder || !real.startsWith(folder + path.sep)) return `Outside this folder: ${real}`;
-    if (RUNS_LATER.test(path.relative(folder, real))) return "This file can run commands later (hooks, tasks or settings)";
-    return "";
+    const real = realPath(path.resolve(this.folder || os.homedir(), file));
+    const inside = !!folder && real.startsWith(folder + path.sep);
+    if (!riskyEdit(real, inside)) return "";
+    return inside || fwd(real).startsWith(fwd(os.tmpdir()) + "/") ? "This file can run commands later (hooks, tasks, settings or shell startup)" : `Outside this folder: ${real}`;
   }
 
   settings() {
@@ -1539,7 +1552,7 @@ function openFile(file, line) {
 }
 
 function html(webview, root, chat) {
-  const nonce = require("crypto").randomUUID();
+  const nonce = require("crypto").randomUUID(); // unguessable, so a script tag can't be forged into the page
   const uri = (f) => webview.asWebviewUri(vscode.Uri.joinPath(root, "media", f));
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
@@ -1592,4 +1605,4 @@ function activate(context) {
   return provider;
 }
 
-module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git };
+module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit };

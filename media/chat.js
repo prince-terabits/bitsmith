@@ -678,7 +678,7 @@ function permissionCard(m) {
       !m.risk && h("button", { title: "Apply this and every later edit in this chat without asking", onclick: () => decide(true, { allEdits: true }, "Applied · later edits in this chat apply without asking") }, icon("check-all"), "Allow all edits in this chat"),
       h("button", { onclick: () => decide(false) }, "Reject"),
       m.hasDiff && h("button", { class: "ghost", onclick: () => send({ type: "showProposed", id: m.id }) }, icon("diff"), "View diff"));
-    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail }, icon("file"), base(m.detail)), "?"),
+    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail, title: m.detail }, icon("file"), base(m.detail)), "?"),
       m.risk && h("div", { class: "risk" }, icon("warning"), m.risk), actions);
   } else {
     append(actions, 
@@ -930,10 +930,12 @@ function resetText(t) {
 function meter(title, sub, w) {
   const pct = w?.used == null ? null : Math.round(w.used * 100);
   const level = pct == null ? "" : pct >= 90 ? "crit" : pct >= 70 ? "warn" : "";
+  const fill = h("span", {});
+  fill.style.width = Math.min(100, pct ?? 0) + "%"; // set through CSSOM: the CSP has no 'unsafe-inline', so a style attribute would be dropped
   return h("div", { class: "usage-row" },
     h("div", { class: "usage-line" }, h("b", {}, title), h("span", { class: "muted small" }, sub), h("span", { class: "grow" }), h("span", { class: "muted small", title: w?.resetsAt ? untilText(w.resetsAt) : "" }, resetText(w?.resetsAt))),
     h("div", { class: "usage-num" }, h("span", { class: "big" }, pct == null ? "–" : `${pct}%`), h("span", { class: "muted" }, " used")),
-    h("div", { class: `bar ${level}`, role: "progressbar", "aria-valuenow": pct ?? 0, "aria-valuemin": 0, "aria-valuemax": 100 }, h("span", { style: `width:${Math.min(100, pct ?? 0)}%` })));
+    h("div", { class: `bar ${level}`, role: "progressbar", "aria-valuenow": pct ?? 0, "aria-valuemin": 0, "aria-valuemax": 100 }, fill));
 }
 
 function renderUsage() {
