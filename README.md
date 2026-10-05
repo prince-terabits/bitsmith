@@ -2,16 +2,7 @@
 
 A Copilot-style coding agent for VS Code's secondary sidebar. It is powered by your local **Claude Code CLI** and its login.
 
-<<<<<<< HEAD
 Bitsmith has no API key of its own and makes no direct API calls. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Bitsmith shows up in `claude --resume`, and the other way round.
-=======
-- Context: the current file (and selection) is suggested automatically; add files and folders with +, Shift+drag from the Explorer, or right-click → Add to Bitsmith Chat
-- Model, effort, Agent/Plan mode and approval policy pickers
-- Live steps (reads, searches, edits with +/- counts, commands), thinking, todos
-- Copilot-style edit review: Keep / Undo per hunk in the editor, per file or all in the chat
-- Approval cards for commands, plans and questions; paste images; slash commands; chat history
-- Edits that can run commands later (`.git/`, `.claude/`, `.vscode/`, shell startup files, anything outside the folder) always ask, whatever the policy
->>>>>>> 49d2421 (Update to version 1.5.2: Enhance security and approval processes for edits that can run commands later)
 
 > Personal use only. It runs on your own Claude login and rate limits. If it is ever shared with other people, it must be changed to use each user's own API key.
 
@@ -74,6 +65,7 @@ Then reload the window.
   - *Review* (default): edits are applied at once and you keep or undo them afterwards; commands ask first.
   - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
   - *Bypass*: nothing asks.
+  - Whatever the policy, an edit that could make something else run commands later always asks: anything under `.git/`, `.claude/` or `.vscode/`, a shell startup file such as `.bashrc`, and any file outside the open folder apart from scratch files in the temp directory. The card says why it asked.
 - **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
 - **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details.
 
@@ -121,6 +113,8 @@ Then reload the window.
 |---|---|---|
 | `bitsmith.claudePath` | `claude` | Path to the Claude Code CLI |
 | `bitsmith.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
+
+Both are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
 
 ## Known limits
 
