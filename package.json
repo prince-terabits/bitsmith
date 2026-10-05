@@ -1,0 +1,219 @@
+{
+  "name": "bitsmith",
+  "displayName": "Bitsmith",
+  "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
+  "version": "1.5.1",
+  "publisher": "prince-terabits",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "bitsmithSecondary",
+          "title": "Bitsmith",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "bitsmithSecondary": [
+        {
+          "type": "webview",
+          "id": "bitsmith.chat",
+          "name": "Bitsmith"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "bitsmith.newChat",
+        "title": "New Chat",
+        "category": "Bitsmith",
+        "icon": "$(add)"
+      },
+      {
+        "command": "bitsmith.history",
+        "title": "Chat History",
+        "category": "Bitsmith",
+        "icon": "$(history)"
+      },
+      {
+        "command": "bitsmith.addContext",
+        "title": "Add Files & Folders to Chat",
+        "category": "Bitsmith",
+        "icon": "$(attach)"
+      },
+      {
+        "command": "bitsmith.addToChat",
+        "title": "Add to Bitsmith Chat",
+        "category": "Bitsmith"
+      },
+      {
+        "command": "bitsmith.addSelection",
+        "title": "Add Selection to Bitsmith Chat",
+        "category": "Bitsmith"
+      },
+      {
+        "command": "bitsmith.keepAll",
+        "title": "Keep All Agent Changes",
+        "category": "Bitsmith"
+      },
+      {
+        "command": "bitsmith.undoAll",
+        "title": "Undo All Agent Changes",
+        "category": "Bitsmith"
+      },
+      {
+        "command": "bitsmith.showUsage",
+        "title": "Show Plan Usage",
+        "category": "Bitsmith",
+        "icon": "$(bitsmith-logo)"
+      },
+      {
+        "command": "bitsmith.exportChat",
+        "title": "Export Chat as Markdown",
+        "category": "Bitsmith",
+        "icon": "$(export)"
+      },
+      {
+        "command": "bitsmith.openInEditor",
+        "title": "Open Chat in Editor",
+        "category": "Bitsmith",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "bitsmith.commitMessage",
+        "title": "Write Commit Message with Bitsmith",
+        "category": "Bitsmith",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "bitsmith.renameChat",
+        "title": "Rename Chat",
+        "category": "Bitsmith",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "bitsmith.deleteChat",
+        "title": "Delete Chat",
+        "category": "Bitsmith",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "bitsmith.newChat",
+          "when": "view == bitsmith.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bitsmith.history",
+          "when": "view == bitsmith.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bitsmith.openInEditor",
+          "when": "view == bitsmith.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "bitsmith.renameChat",
+          "when": "view == bitsmith.chat",
+          "group": "bitsmith@0"
+        },
+        {
+          "command": "bitsmith.exportChat",
+          "when": "view == bitsmith.chat",
+          "group": "bitsmith@2"
+        },
+        {
+          "command": "bitsmith.deleteChat",
+          "when": "view == bitsmith.chat",
+          "group": "bitsmith@1"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "bitsmith.commitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation@0"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "bitsmith.addToChat",
+          "group": "bitsmith@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "bitsmith.addSelection",
+          "when": "editorHasSelection",
+          "group": "bitsmith@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "bitsmith.addToChat",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "bitsmith.chat.focus",
+        "key": "ctrl+shift+alt+i",
+        "mac": "cmd+shift+alt+i"
+      },
+      {
+        "command": "bitsmith.addSelection",
+        "key": "ctrl+shift+alt+l",
+        "mac": "cmd+shift+alt+l",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Bitsmith",
+      "properties": {
+        "bitsmith.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Path to the Claude Code CLI."
+        },
+        "bitsmith.defaultPolicy": {
+          "type": "string",
+          "default": "review",
+          "enum": [
+            "review",
+            "ask",
+            "bypass"
+          ],
+          "enumDescriptions": [
+            "Edits apply right away and stay reviewable with Keep / Undo. Commands ask first.",
+            "Every edit asks first with a diff. Commands ask first.",
+            "Nothing asks. Edits stay reviewable with Keep / Undo."
+          ],
+          "description": "Approval policy for new chats (also switchable from the chat box)."
+        }
+      }
+    },
+    "icons": {
+      "bitsmith-logo": {
+        "description": "Bitsmith logo",
+        "default": {
+          "fontPath": "media/bitsmith-icons.woff",
+          "fontCharacter": "\\E000"
+        }
+      }
+    }
+  },
+  "icon": "media/logo.png"
+}
