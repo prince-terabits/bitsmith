@@ -491,9 +491,9 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   provider.setSetting("mode", "agent");
   fs.writeFileSync("c.txt", "zero\n");
   const send = async (text, checkpoint) => { const st = posts.length; provider.onWebview({ type: "send", text, context: [], checkpoint }); await waitFor((m) => m.type === "done", st); return posts.slice(st); };
-  let q = await send("In this chat, code word one is APPLE. Use the Write tool to set c.txt to exactly: one", 1);
+  let q = await send("My favourite fruit is APPLE. Use the Write tool to set c.txt to exactly: one", 1);
   assert.strictEqual(fs.readFileSync("c.txt", "utf8").trim(), "one", "reply: " + said(q) + " | events: " + q.map((m) => m.type + (m.type === "permission" ? ":" + m.kind : "")).join(","));
-  await send("Code word two is BANANA. Use the Write tool to set c.txt to exactly: two", 2);
+  await send("I also like the fruit BANANA. Use the Write tool to set c.txt to exactly: two", 2);
   assert.strictEqual(fs.readFileSync("c.txt", "utf8").trim(), "two");
   start = posts.length;
   await provider.restore(2);
@@ -504,14 +504,14 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   await provider.redo();
   assert(posts.slice(start).some((m) => m.type === "redone"));
   assert.strictEqual(fs.readFileSync("c.txt", "utf8").trim(), "two", "redo re-applies the edit");
-  p = await send("Which code words have I told you in this chat? Reply with only the words, comma separated.", 3);
+  p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 3);
   assert(/APPLE/.test(said(p)) && /BANANA/.test(said(p)), "conversation back after redo: " + said(p));
   console.log("redo ok:", said(p));
   assert.strictEqual(provider.redoState, null);
   // restore again, then a new message: rewound, and redo is gone
   await provider.restore(2);
   assert.strictEqual(fs.readFileSync("c.txt", "utf8").trim(), "one");
-  p = await send("Which code words have I told you in this chat? Reply with only the words, comma separated.", 4);
+  p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 4);
   assert(/APPLE/.test(said(p)) && !/BANANA/.test(said(p)), "conversation rewound: " + said(p));
   assert.strictEqual(provider.redoState, null, "sending drops redo");
   await provider.restore(1);
@@ -522,8 +522,8 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   // checkpoints survive closing and reopening the chat
   provider.newChat();
   fs.writeFileSync("d.txt", "zero\n");
-  await send("In this chat, code word one is CHERRY. Use the Write tool to set d.txt to exactly: one", 11);
-  await send("Code word two is MANGO. Use the Write tool to set d.txt to exactly: two", 12);
+  await send("My favourite fruit is CHERRY. Use the Write tool to set d.txt to exactly: one", 11);
+  await send("I also like the fruit MANGO. Use the Write tool to set d.txt to exactly: two", 12);
   const reopened = provider.sessionId;
   provider.closeChat(provider.active); // close its tab
   start = posts.length;
@@ -533,23 +533,23 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   assert(replayed[1].checkpoint, "second message has its restore checkpoint after reopening");
   await provider.restore(replayed[1].checkpoint);
   assert.strictEqual(fs.readFileSync("d.txt", "utf8").trim(), "one", "file restored after reopening");
-  p = await send("Which code words have I told you in this chat? Reply with only the words, comma separated.", 13);
+  p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 13);
   assert(/CHERRY/.test(said(p)) && !/MANGO/.test(said(p)), "conversation rewound after reopening: " + said(p));
   console.log("checkpoints after reopen ok:", said(p));
 
   // edit a message: files and conversation rewind to before it, then the edited text is sent
   provider.newChat();
   fs.writeFileSync("e.txt", "zero\n");
-  await send("In this chat, code word one is PLUM. Use the Write tool to set e.txt to exactly: one", 21);
-  await send("Code word two is PEAR. Use the Write tool to set e.txt to exactly: two", 22);
+  await send("My favourite fruit is PLUM. Use the Write tool to set e.txt to exactly: one", 21);
+  await send("I also like the fruit PEAR. Use the Write tool to set e.txt to exactly: two", 22);
   start = posts.length;
-  provider.onWebview({ type: "editMessage", checkpoint: 22, text: "Code word two is KIWI. Use the Write tool to set e.txt to exactly: kiwi" });
+  provider.onWebview({ type: "editMessage", checkpoint: 22, text: "I also like the fruit KIWI. Use the Write tool to set e.txt to exactly: kiwi" });
   const restored = await waitFor((m) => m.type === "restored", start, 30000);
-  assert.strictEqual(restored.resend, "Code word two is KIWI. Use the Write tool to set e.txt to exactly: kiwi");
+  assert.strictEqual(restored.resend, "I also like the fruit KIWI. Use the Write tool to set e.txt to exactly: kiwi");
   assert.strictEqual(fs.readFileSync("e.txt", "utf8").trim(), "one", "edit reverts the old message's file change first");
   await send(restored.resend, 23); // what the panel does with `resend`
   assert.strictEqual(fs.readFileSync("e.txt", "utf8").trim(), "kiwi");
-  p = await send("Which code words have I told you in this chat? Reply with only the words, comma separated.", 24);
+  p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 24);
   assert(/PLUM/.test(said(p)) && /KIWI/.test(said(p)) && !/PEAR/.test(said(p)), "conversation has the edited message only: " + said(p));
   console.log("edit message ok:", said(p));
 
