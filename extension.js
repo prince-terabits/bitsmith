@@ -27,6 +27,18 @@ function riskyEdit(file, inFolder) {
   return !inFolder && !p.startsWith(fwd(os.tmpdir()) + "/");
 }
 
+// The CLI to launch. A bare "claude" that isn't on VS Code's PATH falls back to where the native installer puts it:
+// that folder often reaches only new terminals' PATH, not an editor that was already running or started from a shortcut.
+function claudeBin() {
+  const bin = vscode.workspace.getConfiguration("bitsmith").get("claudePath");
+  if (bin !== "claude") return bin;
+  const exts = process.platform === "win32" ? [".exe", ".com"] : [""]; // what spawn can run without a shell
+  const onPath = (process.env.PATH || "").split(path.delimiter).some((d) => d && exts.some((e) => fs.existsSync(path.join(d, bin + e))));
+  if (onPath) return bin;
+  const home = os.homedir(), exe = process.platform === "win32" ? "claude.exe" : "claude";
+  return [path.join(home, ".local", "bin", exe), path.join(home, ".claude", "local", exe)].find((p) => fs.existsSync(p)) || bin;
+}
+
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
   constructor({ cwd, model, effort, resume, resumeAt, onMessage, onExit }) {
@@ -49,8 +61,10 @@ class Claude {
     this.effort = effort;
     this.waiting = new Map();
     this.stderr = "";
-    this.proc = spawn(cfg.get("claudePath"), args, { cwd, env: process.env });
-    this.proc.on("error", (e) => onExit(`Could not start Claude Code (${cfg.get("claudePath")}): ${e.message}`));
+    const bin = claudeBin();
+    this.proc = spawn(bin, args, { cwd, env: process.env });
+    this.proc.on("error", (e) => onExit(`Could not start Claude Code (${bin}): ${e.message}` +
+      (e.code === "ENOENT" ? ". Install it, or set bitsmith.claudePath to its full path." : "")));
     this.proc.stderr.on("data", (d) => (this.stderr += d));
     this.proc.stdin.on("error", () => {}); // EPIPE when the CLI dies just before a write; its exit is reported by "close"
     this.proc.on("close", (code) => !this.killed && onExit(code ? this.stderr.trim() || `Claude Code exited (${code})` : null));
@@ -803,7 +817,7 @@ class ChatProvider {
       "then, only if it helps, a blank line and a few short bullets. Describe what changed and why, not file by file. Output only the message, no code fences.";
     await vscode.window.withProgress({ location: vscode.ProgressLocation.SourceControl, title: "Bitsmith is writing a commit message" }, async () => {
       const out = await new Promise((res) => {
-        const p = spawn(vscode.workspace.getConfiguration("bitsmith").get("claudePath"), ["-p", "--model", "haiku", "--output-format", "text", prompt], { cwd: repo.rootUri.fsPath, env: process.env });
+        const p = spawn(claudeBin(), ["-p", "--model", "haiku", "--output-format", "text", prompt], { cwd: repo.rootUri.fsPath, env: process.env });
         let text = "", err = "";
         p.stdout.on("data", (d) => (text += d));
         p.stderr.on("data", (d) => (err += d));
