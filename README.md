@@ -22,7 +22,7 @@
 
 Bitsmith is a coding agent for VS Code's secondary sidebar, powered by your local **Claude Code CLI** and its login.
 
-Bitsmith has no API key of its own and makes no direct API calls. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Bitsmith shows up in `claude --resume`, and the other way round.
+Bitsmith has no API key of its own. Its only direct request is reading your plan usage, with the login Claude Code already has. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Bitsmith shows up in `claude --resume`, and the other way round.
 
 > Personal use only. It runs on your own Claude login and rate limits. If it is ever shared with other people, it must be changed to use each user's own API key.
 
