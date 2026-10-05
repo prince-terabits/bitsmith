@@ -2,7 +2,16 @@
 
 A Copilot-style coding agent for VS Code's secondary sidebar. It is powered by your local **Claude Code CLI** and its login.
 
+<<<<<<< HEAD
 Bitsmith has no API key of its own and makes no direct API calls. Everything runs through the `claude` command you already use in the terminal, so sessions, skills, hooks, MCP servers and `CLAUDE.md` are shared with it. A chat started in Bitsmith shows up in `claude --resume`, and the other way round.
+=======
+- Context: the current file (and selection) is suggested automatically; add files and folders with +, Shift+drag from the Explorer, or right-click → Add to Bitsmith Chat
+- Model, effort, Agent/Plan mode and approval policy pickers
+- Live steps (reads, searches, edits with +/- counts, commands), thinking, todos
+- Copilot-style edit review: Keep / Undo per hunk in the editor, per file or all in the chat
+- Approval cards for commands, plans and questions; paste images; slash commands; chat history
+- Edits that can run commands later (`.git/`, `.claude/`, `.vscode/`, shell startup files, anything outside the folder) always ask, whatever the policy
+>>>>>>> 49d2421 (Update to version 1.5.2: Enhance security and approval processes for edits that can run commands later)
 
 > Personal use only. It runs on your own Claude login and rate limits. If it is ever shared with other people, it must be changed to use each user's own API key.
 

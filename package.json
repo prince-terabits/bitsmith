@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -12,6 +12,12 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Bitsmith runs the Claude Code CLI in the open folder, so it stays off until you trust it."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "secondarySidebar": [
@@ -186,11 +192,13 @@
         "bitsmith.claudePath": {
           "type": "string",
           "default": "claude",
-          "description": "Path to the Claude Code CLI."
+          "scope": "machine",
+          "description": "Path to the Claude Code CLI. Machine-scoped: a workspace cannot override which binary is launched."
         },
         "bitsmith.defaultPolicy": {
           "type": "string",
           "default": "review",
+          "scope": "machine",
           "enum": [
             "review",
             "ask",

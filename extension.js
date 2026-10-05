@@ -12,6 +12,18 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
 
+// Files that make something else run commands later: git/Claude/VS Code config and hooks, and shell startup files.
+// Writing one of these is really "run a command", so it asks whatever the policy says, and so does any write
+// outside the workspace (scratch files in the temp dir excepted).
+const RUN_DIRS = ["/.git/", "/.claude/", "/.vscode/"];
+const RUN_FILES = new Set([".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", "config.fish"]);
+const fwd = (p) => path.resolve(p).replace(/\\/g, "/");
+function riskyEdit(file, inFolder) {
+  const p = fwd(file);
+  if (RUN_FILES.has(path.basename(p)) || RUN_DIRS.some((d) => p.includes(d))) return true;
+  return !inFolder && !p.startsWith(fwd(os.tmpdir()) + "/");
+}
+
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
   constructor({ cwd, model, effort, resume, resumeAt, onMessage, onExit }) {
@@ -439,7 +451,8 @@ class Chat {
     }
     if (EDIT_TOOLS.has(req.tool_name)) {
       this.snapshot(file);
-      if (policy !== "ask" || this.allowEdits) return allow();
+      const forced = !!file && riskyEdit(file, this.p.inFolder(file)); // "commands ask first" has to hold for edits that run commands
+      if (!forced && (policy !== "ask" || this.allowEdits)) return allow();
       let diff = null;
       const after = applyEdit(req.tool_name, req.input);
       if (after != null) {
@@ -447,7 +460,10 @@ class Chat {
         proposed.set(diff.toString(), after);
       }
       this.pending.set(id, { req, diff });
-      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, detail: this.rel(file), hasDiff: !!diff });
+      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, hasDiff: !!diff,
+        detail: forced && !this.p.inFolder(file) ? file : this.rel(file), // outside the folder, show where it really goes
+        why: forced ? "This file can make commands run later (hooks, tasks or shell startup), so it asks whatever the approval policy says." : "" });
+      if (forced) this.p.notify(this, "needs your approval");
       if (diff && this.p.active === this) this.showProposed(id);
       return;
     }
@@ -1483,7 +1499,7 @@ function openFile(file, line) {
 }
 
 function html(webview, root, chat) {
-  const nonce = Math.random().toString(36).slice(2);
+  const nonce = require("crypto").randomUUID(); // unguessable, so a script tag can't be forged into the page
   const uri = (f) => webview.asWebviewUri(vscode.Uri.joinPath(root, "media", f));
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
@@ -1536,4 +1552,4 @@ function activate(context) {
   return provider;
 }
 
-module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git };
+module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit };
