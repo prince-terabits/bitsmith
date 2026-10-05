@@ -166,6 +166,33 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     console.log("workspace-only changes ok");
   }
 
+  // edits that could run commands later always ask, even when edits normally apply on their own
+  {
+    const c = provider.active;
+    assert.strictEqual(provider.editRisk(path.join(cwd, "src/app.js")), "");
+    assert.match(provider.editRisk(path.join(require("os").homedir(), ".bashrc")), /^Outside this folder/);
+    for (const f of [".git/hooks/pre-commit", ".vscode/tasks.json", ".claude/settings.json", ".github/workflows/ci.yml"])
+      assert.match(provider.editRisk(path.join(cwd, f)), /run commands/, f);
+    fs.symlinkSync(require("os").homedir(), path.join(cwd, "home-link"));
+    assert.match(provider.editRisk(path.join(cwd, "home-link/.bashrc")), /^Outside this folder/, "a symlink can't hide the real path");
+    fs.rmSync(path.join(cwd, "home-link"));
+    const realClaude = c.claude, said = [], st = posts.length;
+    c.claude = { respond: (id, r) => said.push([id, r.behavior]) };
+    c.ask("r1", { tool_name: "Write", input: { file_path: path.join(cwd, "notes.txt"), content: "x" } });
+    c.ask("r2", { tool_name: "Write", input: { file_path: path.join(cwd, ".vscode/tasks.json"), content: "{}" } });
+    assert.deepStrictEqual(said, [["r1", "allow"]], "an ordinary edit applies, the tasks file waits");
+    assert(posts.slice(st).some((m) => m.type === "permission" && m.id === "r2" && /run commands/.test(m.risk)));
+    c.answer({ id: "r2", allow: false });
+    c.claude = realClaude;
+    provider.edits.snapshots.clear();
+    console.log("risky edits ask ok");
+
+    // a git snapshot that's gone (pruned) must not make Restore delete the files commands changed
+    const t = await c.shellTargets([{ shell: [{ root: cwd, a: "0123456789abcdef0123456789abcdef01234567", changed: ["a.txt"], created: ["made.txt"] }] }]);
+    assert.deepStrictEqual([...t], [[path.join(cwd, "made.txt"), null]], "only the created file is undone");
+    console.log("pruned snapshot ok");
+  }
+
   // a background chat that finishes (or needs approval) raises a toast; the chat on screen doesn't
   {
     const toasts = [];

@@ -65,6 +65,8 @@ Then reload the window.
   - *Review* (default): edits are applied at once and you keep or undo them afterwards; commands ask first.
   - *Ask*: every edit shows a diff and waits for you. An **Allow all edits in this chat** button stops further asking for that chat.
   - *Bypass*: nothing asks.
+  - In *Review* and *Ask*, an edit **always** asks first when the file is outside this folder (symlinks included) or can run commands later: `.git/`, `.vscode/`, `.claude/`, `.husky/`, `.devcontainer/`, `.github/workflows/`. "Allow all edits" doesn't cover these.
+  - Both Bitsmith settings can only be set in your user settings, not by a repo's `.vscode/settings.json`.
 - **Context meter:** a ring that shows how full the context window is. Click it to run `/compact`.
 - **Usage in the status bar:** your 5-hour and weekly plan usage. A percentage appears from 70%, yellow at 80% and red at 95%. Click it for details.
 

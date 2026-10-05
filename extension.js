@@ -9,6 +9,8 @@ const { EditTracker, diffLines, lines, stats } = require("./edits");
 const PROPOSED = "bitsmith-proposed";
 const proposed = new Map(); // proposed-file uri -> content, right side of an "ask first" diff
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+// Edits here can make commands run later without any prompt (git hooks, editor tasks, Claude hooks), so they always ask
+const RUNS_LATER = /(^|[\\/])(\.git|\.vscode|\.claude|\.husky|\.devcontainer|\.github[\\/]workflows)([\\/]|$)/;
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
 
@@ -28,6 +30,7 @@ class Claude {
     this.proc = spawn(cfg.get("claudePath"), args, { cwd, env: process.env });
     this.proc.on("error", (e) => onExit(`Could not start Claude Code (${cfg.get("claudePath")}): ${e.message}`));
     this.proc.stderr.on("data", (d) => (this.stderr += d));
+    this.proc.stdin.on("error", () => {}); // EPIPE when the CLI dies just before a write; its exit is reported by "close"
     this.proc.on("close", (code) => !this.killed && onExit(code ? this.stderr.trim() || `Claude Code exited (${code})` : null));
     readline.createInterface({ input: this.proc.stdout }).on("line", (line) => {
       let m;
@@ -104,10 +107,11 @@ class Chat {
     const s = this.settings();
     const claude = new Claude({
       cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt,
-      onMessage: (m) => this.handle(m),
+      onMessage: (m) => this.claude === claude && this.handle(m), // lines a killed process still had buffered are dropped
       onExit: (err) => {
         if (this.claude !== claude) return;
         this.claude = null;
+        this.dropPending();
         if (err) this.post({ type: "error", text: err });
         if (this.busy) this.finish();
         this.setTasks([]);
@@ -135,11 +139,18 @@ class Chat {
     this.claude?.kill();
     this.claude = null;
     if (this.tasks.length) this.setTasks([]); // they die with the process
+    this.dropPending();
   }
 
   shutdown() {
     this.restart();
+    if (this.busy) { this.busy = false; this.saveCheckpoints(); } // keep this message restorable
+  }
+
+  // Approvals nobody can answer any more: close their diffs and their cards.
+  dropPending() {
     for (const id of this.pending.keys()) this.closeProposed(id);
+    if (this.pending.size) this.post({ type: "approvalsCancelled" });
     this.pending.clear();
   }
 
@@ -164,8 +175,8 @@ class Chat {
     if (!this.claude || !this.busy) return;
     const claude = this.claude;
     claude.request({ subtype: "interrupt" });
-    for (const [id, p] of this.pending) { claude.respond(id, { behavior: "deny", message: "Interrupted by the user." }); this.closeProposed(id, p); }
-    this.pending.clear();
+    for (const id of this.pending.keys()) claude.respond(id, { behavior: "deny", message: "Interrupted by the user." });
+    this.dropPending();
     const stopped = this.started; // only force-stop this turn, never a newer one sent within the timeout
     setTimeout(() => { if (this.busy && this.claude === claude && this.started === stopped) { this.restart(); this.finish(); } }, 4000);
   }
@@ -173,7 +184,7 @@ class Chat {
   finish(extra = {}) {
     this.busy = false;
     this.saveCheckpoints();
-    if (this.turnMark) this.recordShell(this.turnMark);
+    if (this.turnMark) this.recordShell(this.turnMark, this.p.gitMark(), this.checkpoints[this.checkpoints.length - 1]);
     this.turnMark = null;
     for (const file of this.edits.snapshots.keys()) this.edits.syncFromDisk(file);
     this.post({ type: "done", ms: Date.now() - this.started, ...extra });
@@ -326,9 +337,8 @@ class Chat {
 
   // What commands changed during a reply: tracked files that differ between the git states before and after it,
   // and untracked files that appeared. Edits made with the Edit/Write tools are covered by snapshots instead.
-  async recordShell(startMark) {
-    const a = await startMark, b = await this.p.gitMark();
-    const cp = this.checkpoints[this.checkpoints.length - 1];
+  async recordShell(startMark, endMark, cp) {
+    const a = await startMark, b = await endMark;
     if (!a || !b || !cp) return;
     const changed = a.sha === b.sha ? [] : ((await git(b.root, ["diff", "--name-only", "-z", a.sha, b.sha])) || "").split("\0").filter(Boolean);
     const created = [...b.untracked].filter((p) => !a.untracked.has(p));
@@ -341,7 +351,8 @@ class Chat {
   async shellTargets(later) {
     const out = new Map();
     for (const cp of later) for (const t of cp.shell || []) {
-      for (const p of t.changed) { const f = path.join(t.root, p); if (!out.has(f)) out.set(f, await git(t.root, ["show", `${t.a}:${p}`], true)); }
+      const kept = (await git(t.root, ["cat-file", "-e", `${t.a}^{commit}`])) != null; // git gc may have pruned the snapshot
+      if (kept) for (const p of t.changed) { const f = path.join(t.root, p); if (!out.has(f)) out.set(f, await git(t.root, ["show", `${t.a}:${p}`], true)); }
       for (const p of t.created) { const f = path.join(t.root, p); if (!out.has(f)) out.set(f, null); }
     }
     return out;
@@ -379,6 +390,7 @@ class Chat {
         { modal: true, detail: "Command changes come from git snapshots, so edits to untracked or ignored files that already existed aren't covered." }, edit ? "Edit and resend" : "Restore");
       if (!pick) return this.post({ type: "editCancelled", checkpoint: id });
     }
+    if (this.busy) return this.post({ type: "editCancelled", checkpoint: id }); // Claude started replying meanwhile
     const after = new Map(); // bytes, so binary files survive a redo
     for (const f of files.keys()) { try { after.set(f, fs.readFileSync(f)); } catch { after.set(f, null); } }
     this.redoStack.push({ files: after, checkpoints: this.checkpoints.slice(idx), sessionId: this.sessionId, lastUuid: this.lastUuid });
@@ -390,7 +402,6 @@ class Chat {
     this.resumeAt = cp.sessionId ? cp.resumeAt : null;
     this.lastUuid = cp.resumeAt;
     this.edits.refresh();
-    this.saveCheckpoints();
     this.post({ type: "restored", checkpoint: id, resend: edit });
     this.ensure();
   }
@@ -439,7 +450,8 @@ class Chat {
     }
     if (EDIT_TOOLS.has(req.tool_name)) {
       this.snapshot(file);
-      if (policy !== "ask" || this.allowEdits) return allow();
+      const risk = policy !== "bypass" && this.p.editRisk(file);
+      if (!risk && (policy !== "ask" || this.allowEdits)) return allow();
       let diff = null;
       const after = applyEdit(req.tool_name, req.input);
       if (after != null) {
@@ -447,7 +459,8 @@ class Chat {
         proposed.set(diff.toString(), after);
       }
       this.pending.set(id, { req, diff });
-      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, detail: this.rel(file), hasDiff: !!diff });
+      this.p.notify(this, "needs your approval");
+      this.post({ type: "permission", id, kind: "edit", name: req.tool_name, detail: this.rel(file), hasDiff: !!diff, risk: risk || undefined });
       if (diff && this.p.active === this) this.showProposed(id);
       return;
     }
@@ -466,6 +479,13 @@ class Chat {
     this.closeProposed(id, p);
     const { req } = p;
     if (!allow) {
+      const file = EDIT_TOOLS.has(req.tool_name) && (req.input.file_path || req.input.notebook_path);
+      if (file && !fs.existsSync(file)) { // it was never created: no "deleted" row, and a restore mustn't delete it if the user makes it later
+        if (this.edits.snapshots.get(file) === null) this.edits.snapshots.delete(file);
+        const cp = this.checkpoints[this.checkpoints.length - 1];
+        if (cp?.snaps.get(file) === null) cp.snaps.delete(file);
+        this.edits.refresh();
+      }
       return this.claude.respond(id, { behavior: "deny", message: feedback ? `The user said: ${feedback}` : "The user rejected this. Ask what they want instead." });
     }
     let input = req.input;
@@ -503,7 +523,7 @@ class Chat {
     this.sessionId = id;
     this.busy = false;
     this.checkpoints = [];
-    this.redoState = null;
+    this.redoStack = [];
     this.post({ type: "clear" });
     const file = path.join(this.sessionDir(), id + ".jsonl");
     this.lastUuid = lastAssistantUuid(file);
@@ -627,6 +647,16 @@ class ChatProvider {
     return !!this.folder && path.resolve(file).startsWith(this.folder + path.sep);
   }
 
+  // Why an edit must be approved even when edits normally apply on their own, or "" when it's an ordinary file.
+  // Real paths, so a symlink inside the folder can't point at ~/.bashrc.
+  editRisk(file) {
+    const folder = this.folder && realPath(this.folder);
+    const real = realPath(path.resolve(this.folder || os.homedir(), file || ""));
+    if (!folder || !real.startsWith(folder + path.sep)) return `Outside this folder: ${real}`;
+    if (RUNS_LATER.test(path.relative(folder, real))) return "This file can run commands later (hooks, tasks or settings)";
+    return "";
+  }
+
   settings() {
     return {
       model: this.state.get("model", "default"),
@@ -642,7 +672,7 @@ class ChatProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(root, "media")] };
     view.webview.html = html(view.webview, root, this.active.key);
     view.webview.onDidReceiveMessage((m) => this.onWebview(m));
-    view.onDidDispose(() => this.shutdown());
+    view.onDidDispose(() => { for (const c of this.chats.values()) if (!c.panel) c.shutdown(); }); // editor-tab chats live on
   }
 
   // A chat's messages go to wherever it's shown: the sidebar, or its own editor tab. Panel-wide ones go everywhere.
@@ -725,7 +755,9 @@ class ChatProvider {
         p.stdout.on("data", (d) => (text += d));
         p.stderr.on("data", (d) => (err += d));
         p.on("error", (e) => res({ err: e.message }));
-        p.on("close", (code) => res(code ? { err: err.trim() || `exit ${code}` } : { text }));
+        const timer = setTimeout(() => { p.kill(); res({ err: "timed out after 2 minutes" }); }, 120000);
+        p.on("close", (code) => { clearTimeout(timer); res(code ? { err: err.trim() || `exit ${code}` } : { text }); });
+        p.stdin.on("error", () => {}); // it exited before reading all of the diff
         p.stdin.end(diff.length > 60000 ? diff.slice(0, 60000) + "\n[diff truncated]" : diff);
       });
       if (out.err) return vscode.window.showErrorMessage(`Bitsmith couldn't write a commit message: ${out.err.slice(0, 200)}`);
@@ -854,7 +886,7 @@ class ChatProvider {
   // A chat already open in a tab is shown; otherwise it opens in the current tab if that's empty, or a new one.
   openSession(id) {
     const open = [...this.chats.values()].find((c) => c.sessionId === id);
-    if (open) return this.switchTo(open);
+    if (open) return open.panel ? open.panel.reveal() : this.switchTo(open);
     let c = this.active;
     if (!c.fresh || c.busy) {
       c = this.createChat();
@@ -1007,7 +1039,8 @@ class ChatProvider {
     let files = [];
     try { files = fs.readdirSync(this.sessionDir()).filter((f) => f.endsWith(".jsonl")); } catch {}
     return files
-      .map((f) => { const file = path.join(this.sessionDir(), f); return { id: f.slice(0, -6), file, time: fs.statSync(file).mtimeMs }; })
+      .map((f) => { const file = path.join(this.sessionDir(), f); try { return { id: f.slice(0, -6), file, time: fs.statSync(file).mtimeMs }; } catch { return null; } })
+      .filter(Boolean)
       .sort((a, b) => b.time - a.time)
       .slice(0, limit)
       .map((s) => ({ ...s, title: sessionTitle(s.file) }))
@@ -1465,6 +1498,13 @@ function lastAssistantUuid(file) {
 }
 
 // Pasted images only live inside the transcript, so write one to a temp file for VS Code's image viewer.
+// The real path of a file that may not exist yet: resolve its closest existing parent.
+function realPath(file) {
+  try { return fs.realpathSync.native(file); } catch {}
+  const parent = path.dirname(file);
+  return parent === file ? file : path.join(realPath(parent), path.basename(file));
+}
+
 function openImage(mediaType, data) {
   if (!data) return;
   const ext = (/^image\/(\w+)$/.exec(mediaType || "")?.[1] || "png").replace("jpeg", "jpg");
@@ -1483,7 +1523,7 @@ function openFile(file, line) {
 }
 
 function html(webview, root, chat) {
-  const nonce = Math.random().toString(36).slice(2);
+  const nonce = require("crypto").randomUUID();
   const uri = (f) => webview.asWebviewUri(vscode.Uri.joinPath(root, "media", f));
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">

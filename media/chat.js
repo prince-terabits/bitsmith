@@ -9,6 +9,7 @@ function h(tag, props = {}, ...kids) {
     if (k === "class") el.className = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else if (k === "html") el.innerHTML = v;
+    else if (k === "style") el.style.cssText = v; // the CSP blocks style attributes, not CSSOM
     else el.setAttribute(k, v === true ? "" : v);
   }
   for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
@@ -33,14 +34,15 @@ marked.use({
     code: ({ text, lang }) =>
       `<div class="codeblock"><div class="codebar"><span>${escapeHtml(lang || "")}</span><button class="icon-btn copy-code" title="Copy"><i class="codicon codicon-copy"></i></button></div><pre><code>${highlight(text, lang)}</code></pre></div>`,
     codespan: ({ text }) => {
-      const raw = text.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+      const raw = text; // marked passes code text unescaped
       if (looksLikePath(raw)) {
-        const [file, line] = raw.split(":");
-        return `<span class="chip file-link" data-file="${escapeHtml(file)}" data-line="${line || ""}" title="${escapeHtml(raw)}"><i class="codicon codicon-file"></i>${escapeHtml(base(file))}${line ? `:${line}` : ""}</span>`;
+        const [file, ln] = raw.split(":"), line = /^\d+$/.test(ln || "") ? ln : "";
+        return `<span class="chip file-link" data-file="${escapeHtml(file)}" data-line="${line}" title="${escapeHtml(raw)}"><i class="codicon codicon-file"></i>${escapeHtml(base(file))}${line ? `:${line}` : ""}</span>`;
       }
       return `<code>${escapeHtml(raw)}</code>`;
     },
-    link: ({ href, text }) => `<a href="${escapeHtml(href || "")}" title="${escapeHtml(href || "")}">${escapeHtml(text)}</a>`,
+    // only web and mail links are clickable; anything else (command:, file:, javascript:) stays plain text
+    link: ({ href, text }) => /^(https?:|mailto:)/i.test(href || "") ? `<a href="${escapeHtml(href)}" title="${escapeHtml(href)}">${escapeHtml(text)}</a>` : escapeHtml(text),
   },
 });
 const md = (text) => marked.parse(text || "");
@@ -263,7 +265,7 @@ function renderSlash() {
   if (mention) return renderMention();
   const list = slashMatches();
   slash.classList.toggle("hidden", !list.length);
-  slashIndex = Math.min(slashIndex, list.length - 1);
+  slashIndex = Math.max(0, Math.min(slashIndex, list.length - 1));
   slash.replaceChildren(...list.map((c, i) => h("div", { class: `menu-item ${i === slashIndex ? "active" : ""}`, onmousedown: (e) => { e.preventDefault(); pickSlash(c); } },
     h("div", { class: "menu-text" }, h("div", {}, h("b", {}, "/" + c.name), c.hint ? h("span", { class: "muted" }, " " + c.hint) : null), c.description && h("div", { class: "muted small ellipsis" }, c.description.replace(/\s*\((user|project|plugin.*)\)$/, ""))))));
 }
@@ -278,7 +280,7 @@ let mentionTimer;
 function updateMention() {
   const m = input.value.slice(0, input.selectionStart).match(/(?:^|\s)@([^\s@]*)$/);
   if (!m) { mention = null; return; }
-  mention = { q: m[1], items: mention?.items || [], index: 0 };
+  mention = { q: m[1], items: [], index: 0 }; // never pick a result of the previous query
   clearTimeout(mentionTimer);
   mentionTimer = setTimeout(() => send({ type: "fileSearch", q: m[1] }), 80);
 }
@@ -411,6 +413,7 @@ function editMessage(bubble, textEl, checkpoint) {
   area.value = original;
   const done = () => { bubble.classList.remove("editing"); editor.replaceWith(textEl); };
   const save = () => {
+    if (S.busy || bubble.classList.contains("pending")) return; // one resend at a time, never mid-reply
     const text = area.value.trim();
     if (!text || text === original) return done();
     bubble.classList.add("pending");
@@ -619,7 +622,6 @@ function finalize(ms) {
   for (const s of t.body.querySelectorAll(".step.running")) {
     if (s.closest(".substeps")?.closest(".step-box")?.querySelector(":scope > .step.bg")) continue; // a background agent is still working on it
     s.classList.remove("running"); $(".status", s).replaceChildren(icon("circle-slash")); }
-  for (const a of t.body.querySelectorAll(".permission .actions")) a.replaceWith(h("div", { class: "decided muted" }, "Cancelled"));
   const answer = [...t.body.querySelectorAll(":scope > .md")].map((e) => e.raw).join("\n\n");
   if (answer || t.payload) {
     const cp = t.payload?.checkpoint;
@@ -673,10 +675,11 @@ function permissionCard(m) {
   } else if (m.kind === "edit") {
     append(actions, 
       h("button", { class: "primary", onclick: () => decide(true, {}, "Applied") }, icon("check"), "Apply"),
-      h("button", { title: "Apply this and every later edit in this chat without asking", onclick: () => decide(true, { allEdits: true }, "Applied · later edits in this chat apply without asking") }, icon("check-all"), "Allow all edits in this chat"),
+      !m.risk && h("button", { title: "Apply this and every later edit in this chat without asking", onclick: () => decide(true, { allEdits: true }, "Applied · later edits in this chat apply without asking") }, icon("check-all"), "Allow all edits in this chat"),
       h("button", { onclick: () => decide(false) }, "Reject"),
       m.hasDiff && h("button", { class: "ghost", onclick: () => send({ type: "showProposed", id: m.id }) }, icon("diff"), "View diff"));
-    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail }, icon("file"), base(m.detail)), "?"), actions);
+    card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail }, icon("file"), base(m.detail)), "?"),
+      m.risk && h("div", { class: "risk" }, icon("warning"), m.risk), actions);
   } else {
     append(actions, 
       h("button", { class: "primary", onclick: () => decide(true) }, "Allow"),
@@ -790,6 +793,7 @@ function setBusy(on) {
   sendBtn.title = on ? "Queue: sent when this reply ends (Enter)" : "Send (Enter)";
   input.placeholder = on ? "Queue a follow-up… it's sent when this reply ends" : "Ask Bitsmith to build, fix or explain…";
   if (!on) renderTodos();
+  if (cur.queue.length) renderQueue(); // "Send now" only while idle
 }
 
 function submit() {
@@ -806,6 +810,7 @@ function submit() {
   autosize();
   renderChips();
   drawThumbs();
+  mention = null;
   renderSlash();
 }
 
@@ -816,7 +821,7 @@ function renderQueue() {
   queuePanel.classList.toggle("hidden", !q.length);
   queuePanel.replaceChildren(...q.map((p, i) => h("div", { class: "queued" }, icon("clock", "muted"),
     h("span", { class: "ellipsis grow", title: p.text }, p.text), h("span", { class: "muted small" }, i ? `queued #${i + 1}` : "next"),
-    !S.busy && !i && h("button", { class: "icon-btn", title: "Send now", onclick: () => { dispatch({ images: [], ...q.shift() }); renderQueue(); } }, icon("play")),
+    !S.busy && !i && h("button", { class: "icon-btn", title: "Send now", onclick: () => { if (S.busy) return; dispatch({ images: [], ...q.shift() }); renderQueue(); } }, icon("play")),
     h("button", { class: "icon-btn", title: "Edit: move it back to the input", onclick: () => { q.splice(i, 1); unqueue([p]); } }, icon("edit")),
     h("button", { class: "icon-btn", title: "Remove from queue", onclick: () => { q.splice(i, 1); renderQueue(); } }, icon("close")))));
 }
@@ -886,7 +891,7 @@ function dispatch(p) {
 // Rows that act like buttons (recent chats, tabs, tasks, files, images) work from the keyboard too.
 document.addEventListener("keydown", (e) => {
   const el = e.target.closest?.('[role="button"], [role="tab"]');
-  if (el && el.tagName !== "BUTTON" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); el.click(); }
+  if (el && el === e.target && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); el.click(); } // not for a button inside the row
 });
 
 // ---------- clicks on file chips anywhere ----------
@@ -984,6 +989,7 @@ function showChat(key, tell) {
   const c = chats.get(key) || makeChat(key);
   enter(c);
   shown = c;
+  const caughtUp = c.busy || c.unread; // it kept going while hidden: show the latest
   c.unread = c.attention = false;
   for (const x of chats.values()) x.el.classList.toggle("hidden", x !== c);
   const started = !!scroll.querySelector(".turn");
@@ -994,6 +1000,7 @@ function showChat(key, tell) {
   renderTasks();
   renderQueue();
   renderMeter();
+  if (caughtUp) scrollDown(true);
   placeThumb();
   if (tell) send({ type: "switchChat" });
 }
@@ -1080,15 +1087,15 @@ function handle(m) {
       b?.cancelEdit?.();
       return;
     }
+    case "approvalsCancelled":
+      for (const a of scroll.querySelectorAll(".permission .actions")) a.replaceWith(h("div", { class: "decided muted" }, "Cancelled"));
+      return;
     case "redone":
       if (!redo) return;
       scroll.append(...redo.stack.pop());
       if (redo.stack.length) renderRedo(); // another restore can still be redone
       else dropRedo();
-      input.value = "";
-      S.items = [];
-      renderChips();
-      autosize();
+      if (cur === shown) { input.value = ""; S.items = []; renderChips(); autosize(); } // the composer belongs to the chat on screen
       showEmpty(false);
       return scrollDown(true);
     case "restored": {
@@ -1110,16 +1117,16 @@ function handle(m) {
         dispatch({ ...payload, text: m.resend, chips: payload.chips || [] });
         return;
       }
-      if (payload) {
+      if (payload && cur === shown) {
         input.value = payload.text === "See the attached image." ? "" : payload.text;
         S.items = payload.items || [];
         renderChips();
         autosize();
+        input.focus();
       }
       S.todos = [];
       renderTodos();
       showEmpty(!scroll.querySelector(".turn"));
-      input.focus();
       return;
     }
     case "replay":
