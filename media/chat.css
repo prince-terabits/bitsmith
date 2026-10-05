@@ -283,6 +283,12 @@ body.busy .restore-btn { opacity: .4; pointer-events: none; } /* visible, but a 
 .recent-item:hover .delete-chat, .recent-item:focus-within .delete-chat { display: inline-flex; }
 .recent-item:hover .time, .recent-item:focus-within .time { display: none; }
 
+/* editor-tab header */
+.tab-head { display: flex; align-items: center; gap: 2px; flex: none; height: 32px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--border); }
+.tab-head .head-title { flex: 1; font-weight: 500; cursor: default; }
+.tab-head .icon-btn { min-width: 26px; min-height: 26px; }
+.tab-head .codicon { font-size: 16px; }
+
 /* open chats: a tab strip, shown once there are two or more */
 .chat-tabs { display: flex; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--border); overflow-x: auto; flex: none; }
 .chat-tab { display: flex; align-items: center; gap: 5px; max-width: 170px; min-width: 70px; padding: 3px 4px 4px 8px; border-radius: 6px 6px 0 0; color: var(--muted); cursor: pointer; font-size: 0.92em; border-bottom: 2px solid transparent; }

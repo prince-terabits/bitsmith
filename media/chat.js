@@ -113,7 +113,24 @@ const box = h("div", { class: "box" },
 );
 const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
   h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "VS Code only lets panels like this one receive drops while Shift is held" }, "/ for commands · hold Shift to drop files")));
-$("#app").append(tabsBar, composer);
+// In an editor tab VS Code's title bar is far away, so the tab gets its own header: title, history, new chat, more.
+const inTab = "tab" in document.body.dataset;
+const headTitle = h("span", { class: "ellipsis head-title", title: "Double-click to rename", ondblclick: () => send({ type: "renameChat" }) }, "New chat");
+const MORE = [
+  { value: "renameChat", label: "Rename", icon: "edit" },
+  { value: "usage", label: "Plan usage", icon: "pulse" },
+  { value: "exportChat", label: "Export as Markdown", icon: "export" },
+  { value: "deleteChat", label: "Delete", icon: "trash" },
+];
+const moreBtn = h("button", { class: "icon-btn", title: "More", onclick: () => menu(moreBtn, null, MORE, null, (v) => {
+  if (v !== "usage") return send({ type: v });
+  send({ type: "refreshUsage" }); renderUsage(); usageCard.classList.remove("hidden");
+}) }, icon("ellipsis"));
+const tabHead = inTab && h("div", { class: "tab-head" }, headTitle,
+  h("button", { class: "icon-btn", title: "Chat history", onclick: () => send({ type: "history" }) }, icon("history")),
+  h("button", { class: "icon-btn", title: "New chat", onclick: () => send({ type: "newChat" }) }, icon("add")),
+  moreBtn);
+$("#app").append(...(inTab ? [tabHead] : []), tabsBar, composer);
 
 // ---------- dropdown menus ----------
 let openMenu = null;
@@ -1019,6 +1036,7 @@ function closeChat(key) {
 }
 
 function renderTabs() {
+  if (inTab) headTitle.textContent = shown?.title || "New chat";
   tabsBar.classList.toggle("hidden", chats.size < 2);
   if (chats.size < 2) return;
   tabsBar.replaceChildren(...[...chats.values()].map((c) => {
@@ -1043,7 +1061,8 @@ function handle(m) {
     case "chats":
       synced = true;
       for (const c of m.chats) (chats.get(c.key) || makeChat(c.key)).title = c.title;
-      return showChat(m.active);
+      showChat(m.active);
+      return renderTabs();
     case "openChat": if (!chats.has(m.chat)) makeChat(m.chat); return;
     case "showChat": return showChat(m.chat);
     case "closeChat": return closeChat(m.chat);
@@ -1137,6 +1156,7 @@ function handle(m) {
       for (const item of m.items) handle(item);
       finalize();
       return scrollDown(true);
+    case "tabState": return vscode.setState({ ...vscode.getState(), sessionId: m.sessionId }); // an editor tab reopens this chat after a reload
     case "clear":
       redo = null;
       turn = null;

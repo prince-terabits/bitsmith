@@ -85,7 +85,7 @@ Then reload the window.
 ### Chat
 
 - **Several chats at once.** Each chat has its own Claude process and its own tab. A tab shows a spinner while it works, a dot when there's a reply you haven't seen, and a bell when it's waiting for your approval. Double-click a tab to rename it.
-- **Open a chat in an editor tab** (title-bar icon) to give it a full-width view.
+- **Chats in editor tabs:** the Bitsmith icon in any editor's title bar opens a new chat in a tab (also **Bitsmith: Open in New Tab**); the sidebar's ↗ icon moves the current chat into one. The tab has its own header with the chat title, **History**, **New Chat**, and Rename, Plan usage, Export and Delete under **…**, and it comes back after a reload.
 - **Message queue.** Press Enter while Claude is replying to queue the next message. Queued messages can be edited, removed or sent right away, and they survive a window reload.
 - **Open tabs come back** after a reload.
 - **Notifications** when a chat in the background finishes or needs your approval.
@@ -153,7 +153,7 @@ Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chr
 | New Chat, Chat History, Rename Chat, Delete Chat | |
 | Add Files & Folders to Chat, Add to Bitsmith Chat | |
 | Keep All Agent Changes, Undo All Agent Changes | |
-| Export Chat as Markdown, Open Chat in Editor | |
+| Export Chat as Markdown, Open Chat in Editor, Open in New Tab | |
 | Write Commit Message with Bitsmith, Show Plan Usage, Show Claude's Browser | |
 
 ## Settings

@@ -619,7 +619,7 @@ class ChatProvider {
   // Tabs survive a window reload: their session ids (and typed-ahead messages) are saved and reopened when the panel loads.
   saveTabs() {
     if (!this.restored) return; // the saved tabs haven't been reopened yet; don't overwrite them
-    const list = [...this.chats.values()].filter((c) => c.sessionId);
+    const list = [...this.chats.values()].filter((c) => c.sessionId && !c.panel); // editor tabs come back through their serializer
     const queues = {};
     for (const c of list) if (c.queue.length) queues[c.sessionId] = c.queue.map(({ text, items, chips, useActive }) => ({ text, items, chips, useActive, images: [] }));
     this.ws.update("openChats", { ids: list.map((c) => c.sessionId), active: this.active.sessionId || null, queues });
@@ -639,7 +639,7 @@ class ChatProvider {
 
   restoreTabs() {
     const saved = this.ws.get("openChats");
-    if (this.restored || !saved?.ids?.length || this.chats.size > 1 || !this.active.fresh) return (this.restored = true);
+    if (this.restored || !saved?.ids?.length || [...this.chats.values()].some((c) => !c.panel && c !== this.active) || !this.active.fresh) return (this.restored = true);
     this.restored = true;
     const ids = saved.ids.filter((id) => fs.existsSync(path.join(this.sessionDir(), id + ".jsonl")));
     ids.forEach((id, i) => {
@@ -717,8 +717,7 @@ class ChatProvider {
   openInEditor(c = this.active) {
     if (c.panel) return c.panel.reveal();
     if (c.busy) return vscode.window.showInformationMessage("Bitsmith: wait for this reply to finish, then open the chat in an editor tab.");
-    if (!c.sessionId) return vscode.window.showInformationMessage("Bitsmith: send a message first, then the chat can open in an editor tab.");
-    const root = this.context.extensionUri;
+    if (!c.sessionId) return this.openTab(); // nothing to move yet: a new chat in its own tab
     // out of the sidebar first, while its messages still go there
     this.post({ type: "closeChat", chat: c.key });
     if (c === this.active) {
@@ -726,13 +725,37 @@ class ChatProvider {
       if (next) this.switchTo(next);
       else { const fresh = this.createChat(); this.post({ type: "openChat", chat: fresh.key }); this.switchTo(fresh); }
     }
-    const panel = vscode.window.createWebviewPanel("bitsmith.chatTab", c.title || "Bitsmith", vscode.ViewColumn.Active,
-      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [vscode.Uri.joinPath(root, "media")] });
+    this.attach(c);
+  }
+
+  // A chat in a new editor tab: empty, or showing a past session. `panel` is one VS Code restored after a reload.
+  openTab(sessionId = null, panel = null) {
+    const c = this.createChat();
+    c.sessionId = sessionId;
+    this.attach(c, panel);
+    return c;
+  }
+
+  attach(c, panel) {
+    const root = this.context.extensionUri;
+    const options = { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [vscode.Uri.joinPath(root, "media")] };
+    if (panel) panel.webview.options = options;
+    else {
+      // like Claude Code: a split beside the code, and later chats join the group Bitsmith tabs are already in
+      const group = [...this.chats.values()].find((x) => x.panel?.viewColumn)?.panel.viewColumn;
+      panel = vscode.window.createWebviewPanel("bitsmith.chatTab", c.title || "Bitsmith", group || vscode.ViewColumn.Beside, options);
+    }
+    panel.title = c.title || "Bitsmith";
     panel.iconPath = vscode.Uri.joinPath(root, "media", "icon.svg");
     c.panel = panel;
-    panel.webview.html = html(panel.webview, root, c.key);
+    panel.webview.html = html(panel.webview, root, c.key, true);
     panel.webview.onDidReceiveMessage((m) => this.onWebview({ ...m, chat: c.key }, c));
     panel.onDidDispose(() => { c.panel = null; c.shutdown(); this.chats.delete(c.key); this.saveTabs(); });
+  }
+
+  // The chat you're looking at: the focused editor tab's, otherwise the sidebar's. Title-bar commands act on it.
+  current() {
+    return [...this.chats.values()].find((c) => c.panel?.active) || this.active;
   }
 
   // An editor-tab chat's webview loaded: settings, then the conversation from its transcript.
@@ -741,9 +764,10 @@ class ChatProvider {
     c.panel.webview.postMessage({ type: "usage", usage: this.usage, plan: this.plan });
     if (this.info) c.panel.webview.postMessage({ type: "init", ...this.info });
     c.panel.webview.postMessage({ type: "chats", chats: [{ key: c.key, title: c.title }], active: c.key });
+    if (this.folder) c.panel.webview.postMessage({ type: "sessions", items: this.sessions(6).map(({ id, title, time }) => ({ id, title, time })) });
     this.postActiveFile();
     this.edits.refresh();
-    c.loadSession(c.sessionId);
+    if (c.sessionId) c.loadSession(c.sessionId);
     if (c.queue.length) c.post({ type: "queue", items: c.queue });
     c.ensure();
   }
@@ -797,6 +821,9 @@ class ChatProvider {
   async onWebview(m, from = null) {
     const c = this.chats.get(m.chat) || this.active;
     if (from && m.type === "ready") return this.panelReady(from);
+    if (from && m.type === "loadSession") return this.openSession(m.id, from);
+    if (from && m.type === "newChat") return this.newChat(from);
+    if (from && m.type === "history") return this.history(from);
     switch (m.type) {
       case "queue": c.queue = m.items || []; return this.saveTabs();
       case "openInEditor": return this.openInEditor(c);
@@ -813,7 +840,9 @@ class ChatProvider {
         this.active.ensure(); // warm start: fetches models and slash commands
         break;
       case "fileSearch": return this.post({ type: "fileResults", q: m.q, items: await this.searchFiles(m.q) });
-      case "renameChat": return c.sessionId && this.renameSession(c.sessionId);
+      case "renameChat": return c.sessionId ? this.renameSession(c.sessionId) : vscode.window.showInformationMessage("Send a message first; then the chat can be named.");
+      case "deleteChat": return c.sessionId ? this.deleteSession(c.sessionId) : vscode.window.showInformationMessage("This chat hasn't been saved yet.");
+      case "exportChat": return this.exportChat(c);
       case "send": return c.send(m);
       case "stop": return c.interrupt();
       case "open": return this.openPath(c, m.file, m.line);
@@ -893,7 +922,8 @@ class ChatProvider {
   }
 
   // A fresh chat is reused; otherwise the current one keeps running in its own tab.
-  newChat() {
+  newChat(from = this.current()) {
+    if (from.panel) return from.fresh ? from.panel.reveal() : this.openTab(); // from an editor tab: another tab, like the sidebar's +
     this.postSessions(); // the empty chat lists recent chats, including ones from this window
     if (this.active.fresh) return this.active.reset();
     const c = this.createChat();
@@ -931,9 +961,10 @@ class ChatProvider {
   }
 
   // A chat already open in a tab is shown; otherwise it opens in the current tab if that's empty, or a new one.
-  openSession(id) {
+  openSession(id, tab = null) {
     const open = [...this.chats.values()].find((c) => c.sessionId === id);
     if (open) return open.panel ? open.panel.reveal() : this.switchTo(open);
+    if (tab) return tab.fresh ? tab.loadSession(id) : this.openTab(id); // picked from an editor tab: stay in the editor area
     let c = this.active;
     if (!c.fresh || c.busy) {
       c = this.createChat();
@@ -945,6 +976,7 @@ class ChatProvider {
 
   chatChanged(c) {
     this.saveTabs();
+    c.panel?.webview.postMessage({ type: "tabState", sessionId: c.sessionId }); // what a reload reopens in this tab
     this.postSessions(); // a chat got its title: it now belongs in Recent chats
     if (c.panel) c.panel.title = c.title || "Bitsmith";
     this.post({ type: "chatTitle", chat: c.key, title: c.title });
@@ -1132,7 +1164,7 @@ class ChatProvider {
     if (this.folder) this.post({ type: "sessions", items: this.sessions(6).map(({ id, title, time }) => ({ id, title, time })) });
   }
 
-  async history() {
+  async history(tab = this.current().panel ? this.current() : null) {
     const trash = { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Delete chat" };
     const rename = { iconPath: new vscode.ThemeIcon("edit"), tooltip: "Rename chat" };
     const qp = vscode.window.createQuickPick();
@@ -1162,7 +1194,7 @@ class ChatProvider {
         qp.items = [...found.map((s) => item(s, true)), ...recent.filter((s) => !hit.has(s.id)).map((s) => item(s))];
       }, 250);
     });
-    qp.onDidAccept(() => { const pick = qp.selectedItems[0]; qp.hide(); if (pick) this.loadSession(pick.id); });
+    qp.onDidAccept(() => { const pick = qp.selectedItems[0]; qp.hide(); if (pick) this.openSession(pick.id, tab); });
     qp.onDidTriggerItemButton(async ({ item: it, button }) => {
       qp.ignoreFocusOut = true; // keep the list open behind the dialog
       if (button === rename ? await this.renameSession(it.id) : await this.deleteSession(it.id)) load();
@@ -1614,13 +1646,13 @@ function openFile(file, line) {
   vscode.window.showTextDocument(vscode.Uri.file(file), opts);
 }
 
-function html(webview, root, chat) {
+function html(webview, root, chat, tab = false) {
   const nonce = require("crypto").randomUUID(); // unguessable, so a script tag can't be forged into the page
   const uri = (f) => webview.asWebviewUri(vscode.Uri.joinPath(root, "media", f));
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 <link rel="stylesheet" href="${uri("vendor/codicon.css")}"><link rel="stylesheet" href="${uri("chat.css")}"></head>
-<body data-chat="${chat}"><div id="app"></div>
+<body data-chat="${chat}"${tab ? " data-tab" : ""}><div id="app"></div>
 <script nonce="${nonce}" src="${uri("vendor/marked.umd.js")}"></script>
 <script nonce="${nonce}" src="${uri("chat.js")}"></script></body></html>`;
 }
@@ -1659,11 +1691,16 @@ function activate(context) {
     vscode.window.onDidChangeTextEditorSelection(activeChanged),
     vscode.commands.registerCommand("bitsmith.newChat", () => provider.newChat()),
     vscode.commands.registerCommand("bitsmith.history", () => provider.history()),
-    vscode.commands.registerCommand("bitsmith.exportChat", () => provider.exportChat()),
+    vscode.commands.registerCommand("bitsmith.exportChat", () => provider.exportChat(provider.current())),
     vscode.commands.registerCommand("bitsmith.openInEditor", () => provider.openInEditor()),
     vscode.commands.registerCommand("bitsmith.commitMessage", (repo) => provider.commitMessage(repo)),
-    vscode.commands.registerCommand("bitsmith.renameChat", () => provider.sessionId ? provider.renameSession(provider.sessionId) : vscode.window.showInformationMessage("Send a message first; then the chat can be named.")),
-    vscode.commands.registerCommand("bitsmith.deleteChat", () => provider.sessionId ? provider.deleteSession(provider.sessionId) : vscode.window.showInformationMessage("This chat hasn't been saved yet.")),
+    vscode.commands.registerCommand("bitsmith.renameChat", () => { const id = provider.current().sessionId; id ? provider.renameSession(id) : vscode.window.showInformationMessage("Send a message first; then the chat can be named."); }),
+    vscode.commands.registerCommand("bitsmith.deleteChat", () => { const id = provider.current().sessionId; id ? provider.deleteSession(id) : vscode.window.showInformationMessage("This chat hasn't been saved yet."); }),
+    vscode.commands.registerCommand("bitsmith.newChatInEditor", () => provider.openTab()),
+    vscode.window.registerWebviewPanelSerializer("bitsmith.chatTab", { deserializeWebviewPanel: async (panel, state) => {
+      const id = state?.sessionId && fs.existsSync(path.join(provider.sessionDir(), state.sessionId + ".jsonl")) ? state.sessionId : null; // deleted meanwhile: an empty chat
+      provider.openTab(id, panel);
+    } }),
     vscode.commands.registerCommand("bitsmith.addContext", () => provider.pickContext()),
     vscode.commands.registerCommand("bitsmith.addToChat", (uri, uris) => provider.addUris(uris?.length ? uris : uri ? [uri] : [])),
     vscode.commands.registerCommand("bitsmith.addSelection", () => provider.addSelection()),

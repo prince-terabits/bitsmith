@@ -38,6 +38,7 @@ const vscode = {
     createTextEditorDecorationType: () => ({ dispose() {} }),
     createStatusBarItem: () => (statusItem = { show() {}, dispose() {} }),
     registerWebviewViewProvider: (_, p) => { provider = p; return noop(); },
+    registerWebviewPanelSerializer: (_, s) => { serializer = s; return noop(); },
     createTreeView: (_, o) => { tree = o.treeDataProvider; return noop(); }, showWarningMessage: async () => undefined,
     onDidChangeActiveTextEditor: noop, onDidChangeTextEditorSelection: noop, onDidChangeVisibleTextEditors: noop,
   },
@@ -45,7 +46,7 @@ const vscode = {
   commands: { registerCommand: noop, executeCommand: (...a) => commands.push(a) },
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
-let provider, tree, statusItem;
+let provider, tree, statusItem, serializer;
 global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
@@ -304,6 +305,40 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert(tab.posts.some((m) => m.text === "to the tab") && !posts.slice(st).some((m) => m.text === "to the tab"), "routed to the tab");
     tab.handlers[0]({ type: "ready" });
     assert(tab.posts.some((m) => m.type === "replay" && m.items.some((i) => i.text === "panel me")), "the tab replays the chat");
+    assert(tab.posts.some((m) => m.type === "tabState" && m.sessionId === id), "the tab remembers its chat for a reload");
+
+    // the tab's title bar: commands act on the focused tab, + opens another tab, history loads into an empty tab
+    const tabs = [];
+    const fakePanel = () => { const t = { posts: [], handlers: [] }; tabs.push(t); return (t.panel = { webview: { postMessage: (m) => t.posts.push(m), onDidReceiveMessage: (f) => t.handlers.push(f), asWebviewUri: (u) => u, cspSource: "" }, onDidDispose: (f) => (t.dispose = f), reveal() {}, visible: true }); };
+    vscode.window.createWebviewPanel = fakePanel;
+    tab.panel.active = true;
+    assert.strictEqual(provider.current(), c, "the focused tab's chat");
+    provider.newChat();
+    assert.strictEqual(tabs.length, 1, "+ in a tab opens a new tab");
+    const fresh = [...provider.chats.values()].find((x) => x.panel === tabs[0].panel);
+    fresh.ensure = () => {};
+    tab.panel.active = false;
+    tabs[0].handlers[0]({ type: "loadSession", id: "44444444-4444-5555-6666-777777777777" });
+    assert.strictEqual(fresh.sessionId, "44444444-4444-5555-6666-777777777777", "a chat picked in an empty tab opens there");
+    assert(!posts.slice(st).some((m) => m.type === "openChat"), "the sidebar is left alone");
+    tabs[0].dispose();
+
+    // a fresh sidebar chat opens a new editor tab instead of refusing
+    const side = provider.active;
+    provider.openInEditor(side.fresh ? side : provider.createChat());
+    assert.strictEqual(tabs.length, 2, "Open Chat in Editor works on a new chat");
+    assert.strictEqual(provider.active, side, "the sidebar keeps its chat");
+    tabs[1].dispose();
+
+    // after a reload VS Code hands the tab back with its saved state
+    const restored = fakePanel();
+    serializer.deserializeWebviewPanel(restored, { sessionId: id });
+    const back = [...provider.chats.values()].find((x) => x.panel === restored);
+    back.ensure = () => {};
+    tabs[2].handlers[0]({ type: "ready" });
+    assert(tabs[2].posts.some((m) => m.type === "replay" && m.items.some((i) => i.text === "panel me")), "the restored tab replays its chat");
+    tabs[2].dispose();
+
     tab.dispose();
     assert(!provider.chats.has(c.key), "closing the tab closes the chat");
     fs.rmSync(file);

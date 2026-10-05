@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.6.1
+
+- Bitsmith tabs open in a split beside your code, like Claude Code, instead of covering the file you're on. More
+  Bitsmith tabs join that same group.
+
+## 1.6.0
+
+- Open Bitsmith straight into the editor area: a Bitsmith icon in every editor's title bar opens a new chat in a
+  tab (**Bitsmith: Open in New Tab**).
+- Editor-tab chats get their own header inside the tab, like Claude Code's: chat title (double-click to rename),
+  History, New Chat, and Rename, Plan usage, Export and Delete under "…". The buttons in VS Code's title bar for
+  these tabs are gone.
+
+## 1.5.9
+
+- Chats in editor tabs: **Open Chat in Editor** also works on a new chat (it opens an empty one in a tab), and
+  there's **Bitsmith: New Chat in Editor**. The tab's title bar has New Chat, History and Usage, plus Rename, Delete
+  and Export under "…"; they act on that tab. History and Recent chats open into the tab (or a new tab) instead of
+  the sidebar. Tabs reopen with their chat after a window reload instead of staying blank.
+
 ## 1.5.8
 
 - Recent chats on the empty chat screen now include chats started in this window. The list was only read when the
