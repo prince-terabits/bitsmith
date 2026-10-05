@@ -138,7 +138,7 @@ Then reload the window.
 
 ### Browser
 
-Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. It runs in a throwaway profile that's deleted when the chat ends. Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
+Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chrome to test your app: open a page, read it, click, type, press keys, take screenshots and check the console. In headless mode a **Claude's Browser** tab opens beside the chat with a live view you can click, scroll and type into; run **Bitsmith: Show Claude's Browser** to open it in window mode too. Each chat gets a throwaway profile that's deleted when it ends, unless you turn on **`bitsmith.browserKeepLogins`**: then logins stay in a Bitsmith-only Chrome profile (not your own). Reading the page, screenshots and the console never ask; opening, clicking and typing follow your approval policy. Needs Chrome, Chromium or Edge installed.
 
 ### Git
 
@@ -154,7 +154,7 @@ Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chr
 | Add Files & Folders to Chat, Add to Bitsmith Chat | |
 | Keep All Agent Changes, Undo All Agent Changes | |
 | Export Chat as Markdown, Open Chat in Editor | |
-| Write Commit Message with Bitsmith, Show Plan Usage | |
+| Write Commit Message with Bitsmith, Show Plan Usage, Show Claude's Browser | |
 
 ## Settings
 
@@ -163,8 +163,9 @@ Set **`bitsmith.browser`** to `window` or `headless` and Claude gets its own Chr
 | `bitsmith.claudePath` | `claude` | Path to the Claude Code CLI |
 | `bitsmith.defaultPolicy` | `review` | Approval policy for new chats: `review`, `ask` or `bypass` |
 | `bitsmith.browser` | `off` | Browser tools for Claude: `off`, `window` (a visible Chrome) or `headless` |
+| `bitsmith.browserKeepLogins` | `false` | Keep the browser's logins between chats |
 
-All three are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
+All of them are machine-scoped on purpose: a folder's `.vscode/settings.json` can't change which binary Bitsmith launches or turn approvals off. Bitsmith also stays off in Restricted Mode until you trust the folder.
 
 ## Known limits
 

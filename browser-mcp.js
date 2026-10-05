@@ -1,7 +1,9 @@
 // Bitsmith browser tools: a tiny MCP server (JSON-RPC, one message per line on stdin/stdout) that drives
 // its own Chrome over the DevTools protocol. Claude Code starts it from --mcp-config; it needs Node 22+
 // (global WebSocket), which is why Bitsmith runs it with VS Code's own runtime.
-// Env: BITSMITH_BROWSER=window|headless, BITSMITH_CHROME=/path/to/chrome (optional).
+// Env: BITSMITH_BROWSER=window|headless, BITSMITH_CHROME=/path/to/chrome (optional),
+// BITSMITH_PROFILE=dir to keep logins in (optional), BITSMITH_STATE=file to write the page's DevTools URL to,
+// so Bitsmith's live view can attach to the same page.
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -9,7 +11,7 @@ const path = require("path");
 const readline = require("readline");
 
 const headless = process.env.BITSMITH_BROWSER === "headless";
-let chrome = null, profile = null, ws = null, seq = 0, loaded = null;
+let chrome = null, profile = null, temp = false, ws = null, seq = 0, loaded = null;
 const waiting = new Map(), logs = [];
 
 function findChrome() {
@@ -37,15 +39,25 @@ function hostEnv() {
   return env;
 }
 
-// ponytail: a fresh throwaway profile per server (Chrome locks a profile to one instance), so logins don't persist between chats
+// Chrome locks a profile to one running instance: its SingletonLock symlink points at "host-pid".
+function inUse(dir) {
+  try { process.kill(Number(fs.readlinkSync(path.join(dir, "SingletonLock")).split("-").pop()), 0); return true; } catch { return false; }
+}
+const dropProfile = () => { if (temp) try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
+const writeState = (data) => { if (process.env.BITSMITH_STATE) try { data ? fs.writeFileSync(process.env.BITSMITH_STATE, JSON.stringify(data)) : fs.rmSync(process.env.BITSMITH_STATE, { force: true }); } catch {} };
+
+// The kept profile when asked for and free; otherwise (another chat has it open) a throwaway one, deleted at the end.
 async function launch() {
-  profile = fs.mkdtempSync(path.join(os.tmpdir(), "bitsmith-browser-"));
-  const args = ["--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check",
+  const keep = process.env.BITSMITH_PROFILE;
+  temp = !keep || inUse(keep);
+  if (temp) profile = fs.mkdtempSync(path.join(os.tmpdir(), "bitsmith-browser-"));
+  else fs.mkdirSync((profile = keep), { recursive: true });
+  const args = ["--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble",
     "--window-size=1280,800", ...(headless ? ["--headless=new"] : process.env.DISPLAY ? ["--ozone-platform=x11"] : []), "about:blank"];
   chrome = spawn(findChrome(), args, { stdio: ["ignore", "ignore", "pipe"], env: hostEnv() });
   const port = await new Promise((resolve, reject) => {
     let err = "";
-    const fail = (why) => { clearTimeout(timer); try { chrome.kill(); } catch {} fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); reject(new Error(`Chrome did not start (${why}): ${err.trim().split("\n").slice(-6).join("\n")}`)); };
+    const fail = (why) => { clearTimeout(timer); try { chrome.kill(); } catch {} dropProfile(); reject(new Error(`Chrome did not start (${why}): ${err.trim().split("\n").slice(-6).join("\n")}`)); };
     const timer = setTimeout(() => fail("no answer in 20 s"), 20000);
     chrome.on("error", (e) => fail(e.message));
     chrome.on("exit", (code) => fail(`exit ${code}`)); // ignored once resolved
@@ -55,7 +67,7 @@ async function launch() {
       if (m) { clearTimeout(timer); resolve(m[1]); }
     });
   });
-  chrome.on("exit", () => { chrome = null; ws = null; }); // closed by hand: the next call starts a new one
+  chrome.on("exit", () => { chrome = null; ws = null; writeState(null); }); // closed by hand: the next call starts a new one
   const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page");
   ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error("Could not connect to Chrome")); });
@@ -70,6 +82,7 @@ async function launch() {
     else if (m.method === "Log.entryAdded") log(`${p.entry.level} (${p.entry.source}): ${p.entry.text}${p.entry.url ? " " + p.entry.url : ""}`);
   };
   for (const d of ["Page.enable", "Runtime.enable", "Log.enable"]) await send(d);
+  writeState({ ws: page.webSocketDebuggerUrl, headless });
 }
 
 function log(s) { logs.push(s.slice(0, 500)); if (logs.length > 200) logs.shift(); }
@@ -218,13 +231,14 @@ const tools = {
   },
 };
 
-// Stop Chrome, then delete its throwaway profile once it has let go of the files.
+// Stop Chrome, then delete a throwaway profile once Chrome has let go of the files.
 function quit() {
-  const done = () => { try { if (profile) fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} process.exit(0); };
+  writeState(null);
+  const done = () => { dropProfile(); process.exit(0); };
   if (!chrome) return done();
   chrome.once("exit", done);
-  chrome.kill();
-  setTimeout(done, 3000);
+  if (ws) send("Browser.close").catch(() => {}); else chrome.kill(); // a clean close writes cookies to disk; a kill can lose them
+  setTimeout(() => { chrome?.kill(); setTimeout(done, 1000); }, 3000);
 }
 process.on("exit", () => { try { chrome?.kill(); } catch {} });
 for (const s of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(s, quit);

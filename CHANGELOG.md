@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.7
+
+- Live view of Claude's browser: a "Claude's Browser" tab streams the page and passes your clicks, scrolling and
+  typing back, with Back and Reload. It opens by itself in headless mode; **Bitsmith: Show Claude's Browser**
+  opens it any time.
+- `bitsmith.browserKeepLogins`: keep cookies and logins between chats in a Bitsmith-only Chrome profile. If
+  another chat has it open, the new one uses a throwaway profile. Chrome now closes cleanly so cookies are saved.
+
 ## 1.5.6
 
 - Browser tools (setting `bitsmith.browser`: `off`, `window` or `headless`): Claude can open pages in its own Chrome,

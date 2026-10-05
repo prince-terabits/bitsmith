@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { EditTracker, diffLines, lines, stats } = require("./edits");
+const { showBrowser } = require("./browser-view");
 
 const PROPOSED = "bitsmith-proposed";
 const USAGE_POLL = 2 * 60 * 1000; // plan usage refresh while the window is focused
@@ -18,6 +19,7 @@ const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,co
 // outside the workspace (scratch files in the temp dir excepted).
 const RUN_DIRS = ["/.git/", "/.claude/", "/.vscode/", "/.husky/", "/.devcontainer/", "/.github/workflows/"];
 const RUN_FILES = new Set([".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", "config.fish"]);
+let storageDir = null; // the extension's global storage folder, set on activation
 const fwd = (p) => path.resolve(p).replace(/\\/g, "/");
 function riskyEdit(file, inFolder) {
   const p = fwd(file);
@@ -37,7 +39,10 @@ class Claude {
     if (resume && resumeAt) args.push("--resume-session-at", resumeAt, "--fork-session"); // rewind: continue from that reply in a new branch
     const browser = cfg.get("browser");
     if (browser && browser !== "off") { // Bitsmith's own browser tools (browser-mcp.js), run on VS Code's Node, which has WebSocket
-      const server = { command: process.execPath, args: [path.join(__dirname, "browser-mcp.js")], env: { ELECTRON_RUN_AS_NODE: "1", BITSMITH_BROWSER: browser } };
+      this.browserState = path.join(os.tmpdir(), `bitsmith-browser-${process.pid}-${Math.random().toString(36).slice(2)}.json`); // where the live view finds the page
+      const env = { ELECTRON_RUN_AS_NODE: "1", BITSMITH_BROWSER: browser, BITSMITH_STATE: this.browserState };
+      if (cfg.get("browserKeepLogins") && storageDir) env.BITSMITH_PROFILE = path.join(storageDir, "browser-profile");
+      const server = { command: process.execPath, args: [path.join(__dirname, "browser-mcp.js")], env };
       args.push("--mcp-config", JSON.stringify({ mcpServers: { browser: server } }),
         "--allowedTools", "mcp__browser__browser_snapshot,mcp__browser__browser_screenshot,mcp__browser__browser_console"); // looking never asks; acting does
     }
@@ -336,6 +341,10 @@ class Chat {
     const t = this.tools.get(b.tool_use_id);
     if (!t) return;
     const item = resultItem(t, b, parent);
+    if (t.name === "mcp__browser__browser_open" && !b.is_error && this.claude && !this.claude.browserShown) { // headless: nothing to watch otherwise
+      this.claude.browserShown = true;
+      try { if (JSON.parse(fs.readFileSync(this.claude.browserState, "utf8")).headless) showBrowser(this.claude.browserState); } catch {}
+    }
     if (item.diff) this.edits.syncFromDisk(t.input.file_path || t.input.notebook_path).then(() => this.edits.refresh());
     this.post(item);
   }
@@ -1624,6 +1633,7 @@ function migrateFromMyAgent(context) {
 
 function activate(context) {
   migrateFromMyAgent(context);
+  storageDir = context.globalStorageUri.fsPath;
   const provider = new ChatProvider(context);
   const status = vscode.window.createStatusBarItem("bitsmith.status", vscode.StatusBarAlignment.Right, 100);
   status.name = "Bitsmith";
@@ -1655,6 +1665,10 @@ function activate(context) {
     vscode.commands.registerCommand("bitsmith.addContext", () => provider.pickContext()),
     vscode.commands.registerCommand("bitsmith.addToChat", (uri, uris) => provider.addUris(uris?.length ? uris : uri ? [uri] : [])),
     vscode.commands.registerCommand("bitsmith.addSelection", () => provider.addSelection()),
+    vscode.commands.registerCommand("bitsmith.showBrowser", () => {
+      const live = [provider.active, ...provider.chats.values()].map((c) => c.claude?.browserState).filter((f) => f && fs.existsSync(f));
+      live.length ? showBrowser(live[0]) : vscode.window.showInformationMessage("No chat has the browser open. Turn on Settings → Bitsmith → Browser and ask Claude to open a page.");
+    }),
     vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep()),
     vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo()),
     { dispose: () => provider.shutdown() },

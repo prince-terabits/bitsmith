@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -38,6 +38,12 @@
       ]
     },
     "commands": [
+      {
+        "command": "bitsmith.showBrowser",
+        "title": "Show Claude's Browser",
+        "category": "Bitsmith",
+        "icon": "$(globe)"
+      },
       {
         "command": "bitsmith.newChat",
         "title": "New Chat",
@@ -195,7 +201,13 @@
           "scope": "machine",
           "enum": ["off", "window", "headless"],
           "enumDescriptions": ["No browser tools", "Give Claude a browser in its own Chrome window you can watch", "Give Claude a browser without a visible window"],
-          "description": "Bitsmith's own browser tools: Claude can open pages, read them, click, type, take screenshots and check the console in a separate Chrome with a throwaway profile. Applies to chats started after the change."
+          "description": "Bitsmith's own browser tools: Claude can open pages, read them, click, type, take screenshots and check the console in a separate Chrome. In headless mode a live view opens in a tab; run Bitsmith: Show Claude's Browser to open it any time. Applies to chats started after the change."
+        },
+        "bitsmith.browserKeepLogins": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Keep the browser's cookies and logins between chats, in a Bitsmith-only Chrome profile (not your own). Off: every chat starts logged out with a throwaway profile. If two chats use the browser at once, the second gets a throwaway profile."
         },
         "bitsmith.claudePath": {
           "type": "string",
