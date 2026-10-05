@@ -122,7 +122,8 @@ button.small { padding: 1px 8px; min-height: 22px; font-size: 0.92em; }
 .step { display: flex; align-items: center; gap: 6px; min-height: 24px; color: var(--muted); font-size: 0.95em; min-width: 0; }
 .step .title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; max-width: 75%; }
 .step .detail, .step .chip { flex: 1 1 0; min-width: 40px; }
-.step .chip { flex: 0 1 auto; }
+.step .chip { flex: 0 1 auto; overflow: hidden; white-space: nowrap; }
+.step .title:has(+ .chip) { flex: none; max-width: none; } /* "Read" stays whole; the file name gives way instead */
 .step .detail { color: var(--muted); }
 .step code.detail { font-family: var(--vscode-editor-font-family); font-size: 0.9em; background: var(--vscode-textCodeBlock-background); padding: 0 5px; border-radius: 4px; }
 .step .status { width: 16px; flex: none; display: inline-flex; justify-content: center; }

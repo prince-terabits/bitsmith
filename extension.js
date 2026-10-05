@@ -4,7 +4,7 @@ const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const { EditTracker, diffLines, lines, stats } = require("./edits");
+const { EditTracker, diffLines, lines, stats, norm } = require("./edits");
 const { showBrowser } = require("./browser-view");
 
 const PROPOSED = "bitsmith-proposed";
@@ -686,7 +686,7 @@ class ChatProvider {
   }
 
   inFolder(file) {
-    return !!this.folder && path.resolve(file).startsWith(this.folder + path.sep);
+    return !!this.folder && norm(file).startsWith(norm(this.folder) + path.sep);
   }
 
   // Why an edit must be approved whatever the policy (see riskyEdit), or "" when it's an ordinary file.

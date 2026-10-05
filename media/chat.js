@@ -18,7 +18,7 @@ function h(tag, props = {}, ...kids) {
 }
 const icon = (name, cls = "") => h("i", { class: `codicon codicon-${name} ${cls}` });
 const logo = (cls = "") => h("i", { class: `bs-logo ${cls}`, "aria-hidden": "true" });
-const base = (p) => p.split("/").filter(Boolean).pop() || p;
+const base = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
 const dir = (p) => p.split("/").slice(0, -1).join("/");
 const send = (msg) => vscode.postMessage({ chat: cur?.key, ...msg }); // the chat on screen, or the one a queued message belongs to
 
@@ -551,7 +551,7 @@ function addStep(m) {
 
 function stepBox(m) {
   const subject = m.file
-    ? h("span", { class: "chip file-link", "data-file": m.file, title: m.detail }, icon("file"), base(m.detail) + (m.range ? ` ${m.range}` : ""))
+    ? h("span", { class: "chip file-link", "data-file": m.file, title: m.detail }, icon("file"), h("span", { class: "ellipsis" }, base(m.detail) + (m.range ? ` ${m.range}` : "")))
     : m.detail ? h(m.code ? "code" : "span", { class: "detail ellipsis", title: m.detail }, m.detail) : null;
   const row = h("summary", { class: "step running", "data-id": m.id, onclick: (e) => { if (!box.classList.contains("has-body")) e.preventDefault(); else box.dataset.touched = "1"; } },
     h("span", { class: "status" }, icon("loading", "spin")), icon(m.icon || "tools", "step-icon"), h("span", { class: "title" }, m.title), subject,

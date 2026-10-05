@@ -6,6 +6,9 @@ const path = require("path");
 
 const ORIGINAL = "bitsmith-original";
 
+// The path as VS Code spells it (uri.fsPath). On Windows the CLI says "C:\x" or "C:/x" where VS Code says "c:\x".
+const norm = (file) => vscode.Uri.file(path.resolve(file)).fsPath;
+
 // Line diff -> hunks {oStart, oEnd, nStart, nEnd} (half-open line ranges).
 function diffLines(a, b) {
   let pre = 0;
@@ -70,7 +73,7 @@ class EditTracker {
     context.subscriptions.push(
       this.added, this.removed, this.was,
       vscode.workspace.registerTextDocumentContentProvider(ORIGINAL, {
-        provideTextDocumentContent: (uri) => this.snapshots.get(uri.path) ?? "",
+        provideTextDocumentContent: (uri) => this.snapshots.get(vscode.Uri.file(uri.path).fsPath) ?? "",
       }),
       vscode.languages.registerCodeLensProvider({ scheme: "file" }, {
         onDidChangeCodeLenses: this.lensEmitter.event,
@@ -90,6 +93,7 @@ class EditTracker {
 
   // Call before the agent writes a file; the first snapshot wins until kept or undone.
   snapshot(file) {
+    file = norm(file);
     if (this.snapshots.has(file)) return;
     try { this.snapshots.set(file, fs.readFileSync(file, "utf8")); } catch { this.snapshots.set(file, null); }
   }
@@ -213,6 +217,8 @@ class EditTracker {
   // The CLI writes files itself; if VS Code's watcher misses that (large workspaces), the open
   // editor keeps showing the old text. Push the disk version into any clean editor.
   async syncFromDisk(file) {
+    if (!file) return;
+    file = norm(file);
     const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === file);
     if (!doc) return;
     let disk;
@@ -233,9 +239,9 @@ class EditTracker {
   }
 
   showDiff(file) {
-    const left = vscode.Uri.from({ scheme: ORIGINAL, path: file });
+    const left = vscode.Uri.from({ scheme: ORIGINAL, path: vscode.Uri.file(file).path });
     vscode.commands.executeCommand("vscode.diff", left, vscode.Uri.file(file), `${path.basename(file)} (Bitsmith changes)`);
   }
 }
 
-module.exports = { EditTracker, diffLines, lines, stats };
+module.exports = { EditTracker, diffLines, lines, stats, norm };
