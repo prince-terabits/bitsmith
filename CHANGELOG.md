@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.8.0
+
+- **Edit plan:** the plan approval card has an **Edit plan** button that opens the plan as a Markdown file. Approve,
+  and Claude builds the edited plan (the CLI sends it as "Approved Plan (edited by user)"). With **Keep planning**,
+  the edits go back to Claude as feedback. The temp file is removed afterwards.
+- **MCP Servers & Skills** (title-bar `…` menu, or the command palette): a picker with each MCP server (status and
+  scope) and skill (source and token cost), ticked when on. Servers toggle through the CLI's `mcp_toggle` (saved per
+  project in `~/.claude.json`); failed or needs-auth servers have a Reconnect button. Skills toggle through
+  `skillOverrides` in the folder's `.claude/settings.local.json`, then `reload_skills`. Changes apply to every running chat.
+
+## 1.7.2
+
+- Pasting a file or folder path (absolute, `~/`, relative to the workspace or `file://`, one per line) into the
+  input attaches it as a file/folder chip. Paths that don't exist are pasted as plain text.
+
+## 1.7.1
+
+- Fix: files dropped (Shift+drag) or picked with + in a chat open in an editor tab were sent to the sidebar
+  instead; they now land in that tab's input.
+
+## 1.7.0
+
+- Changes made by shell commands (`sed -i`, `python … open().write`, `cat > file`, `rm`, …) are now reviewable and
+  undoable exactly like Edit/Write: they show under "files changed", get Keep/Undo in the panel and in the editor,
+  and Restore checkpoint reverts them. Claude Code calls Bitsmith right before each command (a PreToolUse hook), and
+  Bitsmith takes a git snapshot of every repo the command may touch, including nested repos the folder's
+  `.gitignore` excludes. Not covered: untracked files that already existed, ignored files, and folders outside git.
+
 ## 1.6.4
 
 - Up / Down recall also covers the messages of the chat on screen, so it works in chats reopened from history.

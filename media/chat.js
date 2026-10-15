@@ -361,38 +361,46 @@ input.addEventListener("paste", (e) => {
     e.preventDefault();
     addImageFile(item.getAsFile());
   }
+  // Pasted paths (one per line) become file/folder chips; the extension sends back any that don't exist as text.
+  const lines = (e.clipboardData.getData("text/plain") || "").split(/\r?\n/).map((l) => l.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
+  if (!e.defaultPrevented && lines.length && lines.length <= 50 && lines.every((l) => /^(file:\/\/\S+|~?\/[^\n]+|\.{0,2}[\w.@-]*\/\S*)$/.test(l))) {
+    e.preventDefault();
+    send({ type: "pastePaths", paths: lines });
+  }
 });
 
 // ---------- drag & drop ----------
 let dragDepth = 0;
+// TEMP drag debug: every drag event this page sees goes to /tmp/bitsmith-drag.log
+let dbgLast = 0;
+for (const t of ["dragenter", "dragover", "dragleave", "drop"]) window.addEventListener(t, (e) => {
+  if (t === "dragover" && Date.now() - dbgLast < 300) return;
+  dbgLast = Date.now();
+  send({ type: "dragdbg", line: `${t} shift=${e.shiftKey} target=${e.target?.tagName}.${String(e.target?.className).slice(0, 40)} types=${[...(e.dataTransfer?.types || [])].join(",")} prevented=${e.defaultPrevented}` });
+}, true);
+send({ type: "dragdbg", line: "chat.js loaded, drag listeners on" });
 window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; box.classList.add("dragging"); });
 window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; box.classList.remove("dragging"); } });
 window.addEventListener("dragover", (e) => e.preventDefault());
-window.addEventListener("drop", async (e) => {
+window.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   box.classList.remove("dragging");
-  const uris = await droppedUris(e.dataTransfer);
+  const uris = droppedUris(e.dataTransfer);
   if (uris.length) return send({ type: "drop", uris });
   for (const f of e.dataTransfer.files) if (f.type.startsWith("image/")) addImageFile(f);
 });
 
 // VS Code hands Explorer/editor drags to webviews as "resourceurls" (JSON array of file:// URIs)
 // or "codeeditors" (JSON array of { resource }); the standard uri-list types are a fallback.
-async function droppedUris(dt) {
-  const read = (item) => new Promise((res) => item.getAsString(res));
+// Read synchronously: once the drop handler yields, the DataTransfer is locked and getAsString never calls back.
+function droppedUris(dt) {
   const out = new Set();
-  for (const item of [...dt.items]) {
-    if (item.kind !== "string") continue;
-    const type = item.type.toLowerCase();
-    if (!["resourceurls", "codeeditors", "application/vnd.code.uri-list", "text/uri-list"].includes(type)) continue;
-    const text = await read(item);
-    try {
-      if (type === "resourceurls") JSON.parse(text).forEach((u) => typeof u === "string" && out.add(u));
-      else if (type === "codeeditors") JSON.parse(text).forEach((ed) => { const r = ed?.resource; const u = r?.external || (r?.fsPath && "file://" + r.fsPath); if (u) out.add(u); });
-      else text.split(/\r?\n/).map((u) => u.trim()).filter((u) => u && !u.startsWith("#")).forEach((u) => out.add(u));
-    } catch {}
-  }
+  const json = (type, each) => { try { JSON.parse(dt.getData(type) || "[]").forEach(each); } catch {} };
+  json("resourceurls", (u) => typeof u === "string" && out.add(u));
+  json("codeeditors", (ed) => { const r = ed?.resource; const u = r?.external || (r?.fsPath && "file://" + r.fsPath); if (u) out.add(u); });
+  for (const type of ["application/vnd.code.uri-list", "text/uri-list"])
+    (dt.getData(type) || "").split(/\r?\n/).map((u) => u.trim()).filter((u) => u && !u.startsWith("#")).forEach((u) => out.add(u));
   return [...out].filter((u) => u.startsWith("file:"));
 }
 
@@ -694,8 +702,10 @@ function permissionCard(m) {
     const feedback = h("textarea", { rows: 2, placeholder: "Or tell it what to change…" });
     append(actions, 
       h("button", { class: "primary", onclick: () => decide(true, {}, "Plan approved, building") }, icon("play"), "Approve & build"),
+      h("button", { title: "Open the plan in an editor; your changes are what gets built", onclick: () => send({ type: "editPlan", id: m.id }) }, icon("edit"), "Edit plan"),
       h("button", { onclick: () => decide(false, { feedback: feedback.value.trim() }, "Kept planning") }, "Keep planning"));
     card = h("div", { class: "permission plan" }, h("div", { class: "card-title" }, icon("list-ordered"), "Proposed plan"), h("div", { class: "md", html: md(m.plan) }), feedback, actions);
+    card.dataset.plan = m.id;
   } else if (m.kind === "question") {
     const answers = {};
     const blocks = m.questions.map((q) => {
@@ -1110,6 +1120,12 @@ function handle(m) {
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
     case "activeFile": S.active = m.file; return renderChips();
     case "addContext": return addItems(m.items);
+    case "planText": { // approved after editing: show what is being built
+      const el = document.querySelector(`[data-plan="${CSS.escape(m.id)}"]`);
+      if (el) { el.querySelector(".md").innerHTML = md(m.plan); el.querySelector(".card-title").lastChild.textContent = "Proposed plan (edited)"; }
+      return;
+    }
+    case "insertText": input.setRangeText(m.text, input.selectionStart, input.selectionEnd, "end"); input.focus(); return autosize();
     case "sessions": S.sessions = m.items; return renderEmpty();
     case "text": return addText(m.text);
     case "textStart": if (turn) turn.text = null; return; // a new text block is a new paragraph, not a continuation

@@ -375,6 +375,95 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   if (process.argv.includes("--quick")) process.exit(0);
 
   // background work: an async sub-agent and a background command, Claude's own follow-up, Stop, and two chats at once
+  // Shell commands get Keep/Undo and checkpoints like Edit/Write, also in a nested repo the folder's .gitignore excludes
+  // (the user's Workspace: web/chatbot-development, extensions/bitsmith, apps_main are their own repos).
+  if (process.argv.includes("--live-shell")) {
+    const { execSync } = require("child_process");
+    const sh = (c, dir = cwd) => execSync(c, { cwd: dir, stdio: "pipe" }).toString();
+    fs.writeFileSync("root.txt", "one\n");
+    fs.writeFileSync(".gitignore", "nested/\n");
+    fs.mkdirSync("nested", { recursive: true });
+    fs.writeFileSync("nested/n.txt", "one\n");
+    sh("git init -q && git add root.txt .gitignore && git -c user.email=t@t -c user.name=t commit -qm init");
+    sh("git init -q && git add n.txt && git -c user.email=t@t -c user.name=t commit -qm init", path.join(cwd, "nested"));
+    provider.onWebview({ type: "ready" });
+    provider.setSetting("model", "haiku");
+    provider.setSetting("policy", "bypass");
+    vscode.window.showWarningMessage = async () => "Restore";
+    const ch = provider.active;
+    const send = async (text, checkpoint) => { const s0 = posts.length; provider.onWebview({ type: "send", chat: ch.key, context: [], text, checkpoint }); await waitFor((m) => m.type === "done" && m.chat === ch.key, s0); await new Promise((r) => setTimeout(r, 1500)); return posts.slice(s0); };
+    const nested = path.join(cwd, "nested");
+    await send(`Run exactly this one shell command with the Bash tool, nothing else: sed -i 's/one/two/' root.txt && sed -i 's/one/two/' ${nested}/n.txt && printf 'made\\n' > ${nested}/made.txt`, 701);
+    assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "two\n", "the command ran");
+    assert.strictEqual(fs.readFileSync("nested/n.txt", "utf8"), "two\n");
+    const changed = posts.filter((m) => m.type === "changes").pop()?.files.map((f) => f.rel).sort();
+    assert.deepStrictEqual(changed, ["nested/made.txt", "nested/n.txt", "root.txt"], "shell changes show in 'files changed': " + JSON.stringify(changed));
+    console.log("shell changes listed ok:", changed.join(", "));
+    // Undo one file from the panel: back to the text before the command
+    await provider.edits.undo(path.join(nested, "n.txt"));
+    assert.strictEqual(fs.readFileSync("nested/n.txt", "utf8"), "one\n", "Undo reverts a nested-repo shell change");
+    console.log("undo shell change ok");
+    // Restore the whole message: every file it touched comes back, the created one goes away
+    await send(`Run exactly this one shell command with the Bash tool, nothing else: sed -i 's/two/three/' root.txt`, 702);
+    assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "three\n");
+    await provider.restore(701);
+    assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "one\n", "restore reverts both messages' commands");
+    assert.strictEqual(fs.readFileSync("nested/n.txt", "utf8"), "one\n");
+    assert(!fs.existsSync("nested/made.txt"), "file created by the command is removed");
+    await provider.redo();
+    assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "three\n", "redo re-applies");
+    assert.strictEqual(fs.readFileSync("nested/made.txt", "utf8"), "made\n");
+    console.log("restore + redo of shell changes ok");
+    provider.shutdown();
+    process.exit(0);
+  }
+
+  // Edit plan: the plan opened in an editor and changed there is what Claude gets. MCP & Skills: a skill turned off.
+  if (process.argv.includes("--live-tools")) {
+    provider.onWebview({ type: "ready" });
+    provider.setSetting("model", "haiku");
+    provider.setSetting("policy", "bypass");
+    let planFile;
+    vscode.window.showTextDocument = async (u) => { planFile = u.fsPath; };
+    vscode.window.showInformationMessage = async () => undefined;
+    provider.setSetting("mode", "plan");
+    onPerm = async (m) => {
+      if (m.kind !== "plan") return;
+      await provider.onWebview({ type: "editPlan", id: m.id });
+      fs.writeFileSync(planFile, "1. Create c.txt containing exactly the word EDITED-BY-USER\n");
+      provider.onWebview({ type: "permission", id: m.id, allow: true });
+    };
+    const p = await turn("Plan how to add a c.txt file containing the word hi. Keep the plan to 2 short steps, then present it for approval.");
+    assert(p.some((m) => m.type === "planText" && /EDITED-BY-USER/.test(m.plan)), "the card shows the edited plan");
+    assert(!fs.existsSync(planFile), "the temp plan file is removed");
+    const log = fs.readFileSync(path.join(provider.sessionDir(), provider.sessionId + ".jsonl"), "utf8");
+    assert(/edited by user[^"]*EDITED-BY-USER/.test(log), "Claude got the edited plan");
+    console.log("edit plan ok");
+
+    // the picker lists servers and skills; unticking a skill writes skillOverrides and the CLI reports it off
+    let qp;
+    vscode.window.createQuickPick = () => (qp = { items: [], selectedItems: [], show() {}, hide() { this.onHide?.(); }, dispose() {},
+      onDidTriggerItemButton() {}, onDidAccept(f) { this.accept = f; }, onDidHide(f) { this.onHide = f; } });
+    await provider.manageTools();
+    await waitFor(() => qp.busy === false, 0, 30000);
+    const skill = qp.items.find((i) => i.skill && i.on);
+    assert(skill, "skills listed: " + JSON.stringify(qp.items.map((i) => i.label)));
+    assert(qp.items.some((i) => i.label === "MCP servers"), "MCP section listed");
+    qp.selectedItems = qp.selectedItems.filter((i) => i !== skill);
+    await qp.accept();
+    assert.strictEqual(JSON.parse(fs.readFileSync(".claude/settings.local.json", "utf8")).skillOverrides[skill.skill], "off");
+    const r = await provider.active.claude.request({ subtype: "get_skills_dialog" });
+    assert.strictEqual(r.response.skills.find((s) => s.name === skill.skill).state, "off", "the running CLI sees it off");
+    await provider.manageTools();
+    await waitFor(() => qp.busy === false, 0, 30000);
+    qp.selectedItems = qp.items.filter((i) => i.on || i.skill === skill.skill);
+    await qp.accept();
+    assert(!fs.readFileSync(".claude/settings.local.json", "utf8").includes("skillOverrides"), "turning it back on removes the override");
+    console.log("mcp & skills ok:", skill.skill);
+    provider.shutdown();
+    process.exit(0);
+  }
+
   if (process.argv.includes("--live-bg")) {
     provider.onWebview({ type: "ready" });
     provider.setSetting("model", "haiku");

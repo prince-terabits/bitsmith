@@ -11,6 +11,7 @@ const PROPOSED = "bitsmith-proposed";
 const USAGE_POLL = 2 * 60 * 1000; // plan usage refresh while the window is focused
 const proposed = new Map(); // proposed-file uri -> content, right side of an "ask first" diff
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const PRE_BASH = "bitsmith_pre_bash"; // hook callback the CLI calls (and waits for) before each shell command
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
 
@@ -113,6 +114,7 @@ class Chat {
     this.busy = false;
     this.pending = new Map(); // permission request id -> { req, diff }
     this.tools = new Map(); // tool_use id -> { name, input }
+    this.bashMarks = new Map(); // Bash tool_use id -> git snapshots of the repos it may touch, taken just before it ran
     this.checkpoints = []; // one per live message: { id, sessionId, resumeAt, snaps: Map(file -> text | null) }
     this.lastUuid = null; // last top-level assistant message, the point to rewind the conversation to
     this.userCount = 0; // messages sent since lastUuid; with it, a key for each message that survives reopening and forks
@@ -157,7 +159,7 @@ class Chat {
     claude.mode = "default";
     this.claude = claude;
     this.resumeAt = null;
-    claude.request({ subtype: "initialize" }).then((r) => this.p.onInit(r));
+    claude.request({ subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => this.p.onInit(r));
     this.syncSettings();
     return claude;
   }
@@ -286,6 +288,7 @@ class Chat {
       if (this.busy) this.finish({ cost: m.total_cost_usd });
     } else if (m.type === "control_request") {
       if (m.request.subtype === "can_use_tool") this.ask(m.request_id, m.request);
+      else if (m.request.subtype === "hook_callback") this.preBash(m.request_id, m.request);
       else this.claude?.write({ type: "control_response", response: { subtype: "error", request_id: m.request_id, error: "Not supported" } });
     }
   }
@@ -360,6 +363,8 @@ class Chat {
       try { if (JSON.parse(fs.readFileSync(this.claude.browserState, "utf8")).headless) showBrowser(this.claude.browserState); } catch {}
     }
     if (item.diff) this.edits.syncFromDisk(t.input.file_path || t.input.notebook_path).then(() => this.edits.refresh());
+    const marks = this.bashMarks.get(b.tool_use_id);
+    if (marks) { this.bashMarks.delete(b.tool_use_id); this.captureShell(marks); }
     this.post(item);
   }
 
@@ -371,6 +376,49 @@ class Chat {
     if (cp && !cp.snaps.has(file)) {
       try { cp.snaps.set(file, fs.readFileSync(file, "utf8")); } catch { cp.snaps.set(file, null); }
     }
+  }
+
+  // Same as snapshot(), with the pre-change text already known.
+  snapshotText(file, text) {
+    if (this.p.inFolder(file)) this.edits.snapshotText(file, text);
+    const cp = this.checkpoints[this.checkpoints.length - 1];
+    if (cp && !cp.snaps.has(file)) cp.snaps.set(file, text);
+  }
+
+  // Before a shell command runs (the CLI waits for this): git-snapshot every repo it may touch,
+  // so files it changes get Keep/Undo and a checkpoint exactly like Edit/Write.
+  async preBash(id, req) {
+    const claude = this.claude;
+    try {
+      const input = req.input || {};
+      if (input.tool_name === "Bash" && req.tool_use_id) {
+        const roots = await this.p.reposFor(input.cwd || this.folder, input.tool_input?.command || "");
+        const marks = (await Promise.all(roots.map((r) => this.p.gitMark(r)))).filter(Boolean);
+        if (marks.length) this.bashMarks.set(req.tool_use_id, marks);
+      }
+    } catch {}
+    claude?.write({ type: "control_response", response: { subtype: "success", request_id: id, response: {} } });
+  }
+
+  // After the command: what changed since its snapshots becomes reviewable and restorable.
+  async captureShell(marks) {
+    const touched = [];
+    for (const a of marks) {
+      const b = await this.p.gitMark(a.root);
+      if (!b) continue;
+      const changed = ((await git(a.root, ["diff", "--name-only", "-z", a.sha])) || "").split("\0").filter(Boolean);
+      for (const p of changed) {
+        const before = await git(a.root, ["show", `${a.sha}:${p}`], true); // null: not in the snapshot, so the command created it
+        if (before && before.includes(0)) continue; // binary: the reply-level git record still covers it on Restore
+        touched.push(path.join(a.root, p));
+        this.snapshotText(touched[touched.length - 1], before == null ? null : before.toString("utf8"));
+      }
+      for (const p of b.untracked) if (!a.untracked.has(p)) { touched.push(path.join(a.root, p)); this.snapshotText(touched[touched.length - 1], null); }
+    }
+    if (!touched.length) return;
+    for (const f of touched) await this.edits.syncFromDisk(f);
+    this.edits.refresh();
+    this.saveCheckpoints();
   }
 
   // ---- checkpoints ----
@@ -518,6 +566,7 @@ class Chat {
     if (!p || !this.claude) return;
     if (allEdits) this.allowEdits = true; // the rest of this chat's edits apply without asking
     this.pending.delete(id);
+    const plan = this.editedPlan(p);
     this.closeProposed(id, p);
     const { req } = p;
     if (!allow) {
@@ -528,10 +577,12 @@ class Chat {
         if (cp?.snaps.get(file) === null) cp.snaps.delete(file);
         this.edits.refresh();
       }
-      return this.claude.respond(id, { behavior: "deny", message: feedback ? `The user said: ${feedback}` : "The user rejected this. Ask what they want instead." });
+      const said = [plan && `The user edited the plan to:\n\n${plan}`, feedback && `The user said: ${feedback}`].filter(Boolean).join("\n\n");
+      return this.claude.respond(id, { behavior: "deny", message: said || "The user rejected this. Ask what they want instead." });
     }
     let input = req.input;
     if (req.tool_name === "AskUserQuestion") input = { ...input, answers };
+    if (plan) { input = { ...input, plan }; this.post({ type: "planText", id, plan }); } // "Approved Plan (edited by user)"
     const extra = always && req.permission_suggestions ? { updatedPermissions: req.permission_suggestions } : {};
     this.claude.respond(id, { behavior: "allow", updatedInput: input, ...extra });
     if (req.tool_name === "ExitPlanMode") {
@@ -539,6 +590,17 @@ class Chat {
       this.syncSettings();
       this.p.post({ type: "settings", ...this.settings() });
     }
+  }
+
+  // Open a proposed plan as a Markdown file; whatever it says when the plan is approved is what Claude builds.
+  async editPlan(id) {
+    const p = this.pending.get(id);
+    if (!p || p.req.tool_name !== "ExitPlanMode") return;
+    if (!p.planFile) {
+      p.planFile = path.join(os.tmpdir(), `bitsmith-plan-${require("crypto").randomUUID()}.md`);
+      fs.writeFileSync(p.planFile, p.req.input.plan || "");
+    }
+    await vscode.window.showTextDocument(vscode.Uri.file(p.planFile), { preview: false });
   }
 
   showProposed(id) {
@@ -550,12 +612,27 @@ class Chat {
   }
 
   closeProposed(id, p = this.pending.get(id)) {
+    if (p?.planFile) {
+      const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.input?.uri?.fsPath === p.planFile);
+      const file = p.planFile;
+      vscode.workspace.textDocuments.find((d) => d.uri.fsPath === file)?.save() // so closing doesn't ask to save a throwaway file
+        .then(() => vscode.window.tabGroups.close(tabs)).then(() => fs.rmSync(file, { force: true }));
+      if (!tabs.length) fs.rmSync(file, { force: true });
+    }
     if (!p?.diff) return;
     const key = p.diff.toString();
     proposed.delete(key);
     for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
       if (tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === key) vscode.window.tabGroups.close(tab);
     }
+  }
+
+  // The plan's text if the user changed it in the editor, else null.
+  editedPlan(p) {
+    if (!p.planFile) return null;
+    const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === p.planFile);
+    const plan = (doc ? doc.getText() : fs.existsSync(p.planFile) ? fs.readFileSync(p.planFile, "utf8") : "").trim();
+    return plan && plan !== (p.req.input.plan || "").trim() ? plan : null;
   }
 
   // ---- history ----
@@ -641,14 +718,41 @@ class ChatProvider {
 
   // The working tree's git state right now, without touching it: a stash-like commit of tracked files, plus untracked paths.
   // ponytail: these commits are unreferenced, so a `git gc` after ~2 weeks can drop them and old checkpoints lose command reverts.
-  async gitMark() {
-    if (this.gitRoot === undefined) this.gitRoot = this.folder ? ((await git(this.folder, ["rev-parse", "--show-toplevel"])) || "").trim() || null : null;
-    const root = this.gitRoot;
+  async gitMark(root) {
+    if (root === undefined) {
+      if (this.gitRoot === undefined) this.gitRoot = this.folder ? await this.repoRoot(this.folder) : null;
+      root = this.gitRoot;
+    }
     if (!root) return null;
     const sha = ((await git(root, ["stash", "create"])) || "").trim() || ((await git(root, ["rev-parse", "HEAD"])) || "").trim();
     const status = await git(root, ["status", "--porcelain", "-z", "-uall"]);
     if (!sha || status == null) return null;
     return { root, sha, untracked: new Set(status.split("\0").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3))) };
+  }
+
+  async repoRoot(dir) {
+    if (!this.roots) this.roots = new Map();
+    if (!this.roots.has(dir)) this.roots.set(dir, ((await git(dir, ["rev-parse", "--show-toplevel"])) || "").trim() || null);
+    return this.roots.get(dir);
+  }
+
+  // The git repos a shell command may change: its working directory, absolute and ~ paths in it, and cd targets.
+  // Nested repos count (e.g. a project the folder's own .gitignore excludes); repos outside the folder don't.
+  async reposFor(cwd, command) {
+    const dirs = new Set([cwd]);
+    const home = (p) => p.replace(/^~(?=\/|$)/, os.homedir());
+    for (const m of command.matchAll(/(?:^|[\s'"=:;&|(<>])((?:~|\/)[^\s'"|;&<>()]*)/g)) dirs.add(home(m[1]));
+    for (const m of command.matchAll(/\bcd\s+(['"]?)([^\s'";&|]+)\1/g)) dirs.add(path.resolve(cwd, home(m[2])));
+    const roots = new Set();
+    for (let d of dirs) {
+      d = path.resolve(cwd, d);
+      while (d !== path.dirname(d) && !fs.existsSync(d)) d = path.dirname(d); // a file the command will create
+      try { if (!fs.statSync(d).isDirectory()) d = path.dirname(d); } catch { continue; }
+      const root = await this.repoRoot(d);
+      const f = this.folder;
+      if (root && f && (root === f || this.inFolder(root) || (f + path.sep).startsWith(root + path.sep))) roots.add(root); // inside the folder, or the folder's own repo
+    }
+    return [...roots];
   }
 
   restoreTabs() {
@@ -862,10 +966,13 @@ class ChatProvider {
       case "open": return this.openPath(c, m.file, m.line);
       case "openImage": return openImage(m.mediaType, m.data);
       case "permission": return c.answer(m);
+      case "editPlan": return c.editPlan(m.id);
       case "showProposed": return c.showProposed(m.id);
       case "setting": return this.setSetting(m.key, m.value);
-      case "pickContext": return this.pickContext();
-      case "drop": return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)));
+      case "pickContext": return this.pickContext(c);
+      case "dragdbg": return fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} [${m.chat}] ${m.line}\n`); // TEMP drag debug
+      case "drop": fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} host got drop: ${JSON.stringify(m.uris)}\n`); return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)), c);
+      case "pastePaths": return this.pastePaths(m.paths, c);
       case "keep": return this.edits.keep(m.file);
       case "undo": return this.edits.undo(m.file);
       case "diffFile": return this.edits.showDiff(m.file);
@@ -1115,13 +1222,15 @@ class ChatProvider {
     this.post({ type: "activeFile", file: a && { file: a.file, rel: a.rel, selection: a.selection && { start: a.selection.start, end: a.selection.end } } });
   }
 
-  addItems(items) {
+  // c: the chat that asked (a drop or the + picker); its editor tab gets the items instead of the sidebar
+  addItems(items, c) {
     if (!items.length) return;
+    if (c?.panel) return c.panel.webview.postMessage({ type: "addContext", items });
     vscode.commands.executeCommand("bitsmith.chat.focus");
     this.post({ type: "addContext", items });
   }
 
-  async addUris(uris) {
+  async addUris(uris, c) {
     const items = [];
     for (const uri of uris) {
       try {
@@ -1129,7 +1238,73 @@ class ChatProvider {
         items.push({ kind: st.type & vscode.FileType.Directory ? "folder" : "file", file: uri.fsPath, rel: this.rel(uri.fsPath) });
       } catch {}
     }
-    this.addItems(items);
+    this.addItems(items, c);
+  }
+
+  // Pasted text that looked like paths: existing ones become chips, the rest goes back into the input as typed.
+  pastePaths(paths, c) {
+    const items = [], rest = [];
+    for (const p of paths) {
+      const file = p.startsWith("file://") ? vscode.Uri.parse(p).fsPath : this.abs(p.replace(/^~(?=\/|$)/, os.homedir()));
+      try {
+        items.push({ kind: fs.statSync(file).isDirectory() ? "folder" : "file", file, rel: this.rel(file) });
+      } catch { rest.push(p); }
+    }
+    this.addItems(items, c);
+    if (rest.length) (c?.panel ? c.panel.webview : this.view?.webview)?.postMessage({ type: "insertText", text: rest.join("\n") });
+  }
+
+  // MCP servers and skills, ticked when on. Servers toggle through the CLI (saved per project in ~/.claude.json);
+  // skills through skillOverrides in the folder's .claude/settings.local.json, which the CLI's update_settings won't write.
+  async manageTools(c = this.current()) {
+    const claude = c.ensure();
+    if (!claude) return vscode.window.showInformationMessage("Open a folder first.");
+    const qp = vscode.window.createQuickPick();
+    qp.canSelectMany = true;
+    qp.matchOnDescription = true;
+    qp.placeholder = "Tick the MCP servers and skills Claude can use in this folder";
+    qp.busy = true;
+    qp.show();
+    const reconnect = { iconPath: new vscode.ThemeIcon("refresh"), tooltip: "Reconnect" };
+    const load = async () => {
+      const [mcp, sk] = await Promise.all([claude.request({ subtype: "mcp_status" }), claude.request({ subtype: "get_skills_dialog" })]);
+      const servers = (mcp.response?.mcpServers || []).map((s) => ({ label: `$(server) ${s.name}`, description: `${s.status} · ${s.scope}`, server: s.name, on: s.status !== "disabled",
+        buttons: s.status === "failed" || s.status === "needs-auth" ? [reconnect] : [] }));
+      const skills = (sk.response?.skills || []).map((s) => ({ label: `$(sparkle) ${s.display_name || s.name}`, description: `${s.source} · ~${s.tokens} tokens · ${s.description || ""}`, skill: s.name, on: s.state !== "off" }));
+      qp.items = [{ label: "MCP servers", kind: vscode.QuickPickItemKind.Separator }, ...servers, { label: "Skills", kind: vscode.QuickPickItemKind.Separator }, ...skills];
+      qp.selectedItems = qp.items.filter((i) => i.on);
+      qp.busy = false;
+    };
+    qp.onDidTriggerItemButton(async ({ item }) => {
+      qp.busy = true;
+      const r = await claude.request({ subtype: "mcp_reconnect", serverName: item.server });
+      if (r.subtype !== "success") vscode.window.showWarningMessage(`${item.server}: ${r.error || "couldn't reconnect"}`);
+      await load();
+    });
+    qp.onDidAccept(async () => {
+      const picked = new Set(qp.selectedItems);
+      const changed = qp.items.filter((i) => i.kind !== vscode.QuickPickItemKind.Separator && picked.has(i) !== i.on);
+      qp.hide();
+      if (!changed.length) return;
+      const live = [...new Set([this.active, ...this.chats.values()])].map((x) => x?.claude).filter(Boolean);
+      for (const i of changed.filter((i) => i.server)) for (const cl of live) await cl.request({ subtype: "mcp_toggle", serverName: i.server, enabled: !i.on });
+      const skills = changed.filter((i) => i.skill);
+      if (skills.length) {
+        const file = path.join(this.folder, ".claude", "settings.local.json");
+        let settings = {};
+        try { if (fs.existsSync(file)) settings = JSON.parse(fs.readFileSync(file, "utf8")); }
+        catch { return vscode.window.showErrorMessage(`Bitsmith didn't change skills: ${file} isn't valid JSON.`); }
+        const o = settings.skillOverrides = settings.skillOverrides || {};
+        for (const i of skills) if (i.on) o[i.skill] = "off"; else delete o[i.skill];
+        if (!Object.keys(o).length) delete settings.skillOverrides;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+        for (const cl of live) await cl.request({ subtype: "reload_skills" });
+      }
+      vscode.window.showInformationMessage(`Bitsmith: ${changed.map((i) => `${i.server || i.skill} ${i.on ? "off" : "on"}`).join(", ")}.`);
+    });
+    qp.onDidHide(() => qp.dispose());
+    load().catch((e) => { qp.hide(); vscode.window.showErrorMessage(`Bitsmith couldn't list MCP servers and skills: ${e.message}`); });
   }
 
   addSelection() {
@@ -1138,7 +1313,7 @@ class ChatProvider {
     this.addItems([{ kind: "selection", file: e.document.uri.fsPath, rel: this.rel(e.document.uri.fsPath), start: e.selection.start.line + 1, end: e.selection.end.line + 1, text: e.document.getText(e.selection) }]);
   }
 
-  async pickContext() {
+  async pickContext(c) {
     if (!this.folder) return;
     const open = vscode.window.tabGroups.all.flatMap((g) => g.tabs).map((t) => t.input?.uri).filter((u) => u?.scheme === "file");
     const files = await vscode.workspace.findFiles("**/*", EXCLUDE, 5000);
@@ -1153,7 +1328,7 @@ class ChatProvider {
       ...[...folders].sort().map((f) => item(f, "folder")),
       ...files.filter((f) => !seen.has(f.fsPath)).map((f) => item(f.fsPath, "file")),
     ], { canPickMany: true, matchOnDescription: true, placeHolder: "Add files and folders to the chat" });
-    if (picks) this.addItems(picks.map((p) => ({ kind: p.kind, file: p.file, rel: this.rel(p.file) })));
+    if (picks) this.addItems(picks.map((p) => ({ kind: p.kind, file: p.file, rel: this.rel(p.file) })), c);
   }
 
   // ---- history (shared with the Claude Code CLI) ----
@@ -1705,6 +1880,7 @@ function activate(context) {
     vscode.window.onDidChangeTextEditorSelection(activeChanged),
     vscode.commands.registerCommand("bitsmith.newChat", () => provider.newChat()),
     vscode.commands.registerCommand("bitsmith.history", () => provider.history()),
+    vscode.commands.registerCommand("bitsmith.manageTools", () => provider.manageTools()),
     vscode.commands.registerCommand("bitsmith.exportChat", () => provider.exportChat(provider.current())),
     vscode.commands.registerCommand("bitsmith.openInEditor", () => provider.openInEditor()),
     vscode.commands.registerCommand("bitsmith.commitMessage", (repo) => provider.commitMessage(repo)),

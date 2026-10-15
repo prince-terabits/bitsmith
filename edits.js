@@ -98,6 +98,12 @@ class EditTracker {
     try { this.snapshots.set(file, fs.readFileSync(file, "utf8")); } catch { this.snapshots.set(file, null); }
   }
 
+  // Same, when the pre-change text is already known (a shell command's file, from a git snapshot taken before it ran).
+  snapshotText(file, text) {
+    file = norm(file);
+    if (!this.snapshots.has(file)) this.snapshots.set(file, text);
+  }
+
   current(file) {
     const open = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === file);
     if (open) return open.getText();
