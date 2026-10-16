@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.3
+
+- **Middle-click closes a chat tab**, like editor tabs (same as its × button).
+
 ## 1.10.2
 
 - **Fix: Retry sent the message again.** Retry now rewinds to just before that message and runs it again in

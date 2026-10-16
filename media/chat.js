@@ -1113,7 +1113,10 @@ function renderTabs() {
     const state = c.attention ? icon("bell-dot", "attn") : c.busy || c.tasks.length ? icon("loading", "spin")
       : c.unread ? h("span", { class: "dot", title: "New reply" }) : icon("comment-discussion", "muted");
     return h("div", { class: `chat-tab ${c === shown ? "active" : ""}`, role: "tab", tabindex: "0", "aria-selected": String(c === shown), title: (c.title || "New chat") + " · double-click to rename",
-      onclick: () => c !== shown && showChat(c.key, true), ondblclick: () => send({ type: "renameChat", chat: c.key }) },
+      onclick: () => c !== shown && showChat(c.key, true), ondblclick: () => send({ type: "renameChat", chat: c.key }),
+      // middle-click closes, like editor tabs; mousedown is stopped too so it doesn't start autoscroll
+      onmousedown: (e) => e.button === 1 && e.preventDefault(),
+      onauxclick: (e) => { if (e.button === 1) { e.preventDefault(); send({ type: "closeChat", chat: c.key }); } } },
       state, h("span", { class: "ellipsis" }, c.title || "New chat"),
       h("button", { class: "icon-btn close", title: "Close chat", "aria-label": `Close chat: ${c.title || "New chat"}`, onclick: (e) => { e.stopPropagation(); send({ type: "closeChat", chat: c.key }); } }, icon("close")));
   }));
