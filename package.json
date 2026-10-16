@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.8.0",
+  "version": "1.10.2",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -157,7 +157,7 @@
         {
           "command": "bitsmith.manageTools",
           "when": "view == bitsmith.chat",
-          "group": "bitsmith@3"
+          "group": "navigation@4"
         },
         {
           "command": "bitsmith.exportChat",
@@ -241,6 +241,22 @@
           "default": false,
           "scope": "machine",
           "description": "Keep the browser's cookies and logins between chats, in a Bitsmith-only Chrome profile (not your own). Off: every chat starts logged out with a throwaway profile. If two chats use the browser at once, the second gets a throwaway profile."
+        },
+        "bitsmith.autoCompactAt": {
+          "type": "string",
+          "default": "200000",
+          "scope": "machine",
+          "enum": ["150000", "200000", "300000", "500000", "default", "off"],
+          "enumItemLabels": ["150k tokens", "200k tokens", "300k tokens", "500k tokens", "Claude Code default (near the model's limit)", "Off"],
+          "enumDescriptions": [
+            "Compact early: fastest replies, least plan usage",
+            "Recommended: long chats stay quick and cheap",
+            "More history kept before compacting",
+            "Even more history; replies get slower and use more of your plan",
+            "Only when the model's context window is nearly full (about 967k of 1M)",
+            "Never compact on its own; use the context meter to compact by hand"
+          ],
+          "markdownDescription": "When Claude compacts a long chat on its own (summarizes the conversation so far to free up space). It happens at about this size minus a ~33k buffer for the summary, so `200k` compacts near 167k. The context meter fills toward this point. Running chats switch on their next message."
         },
         "bitsmith.claudePath": {
           "type": "string",

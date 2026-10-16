@@ -181,13 +181,15 @@ class EditTracker {
     return out;
   }
 
+  // One file, a list of files (a chat's own), or with nothing given, every file.
   keep(file) {
-    if (file) this.snapshots.delete(file); else this.snapshots.clear();
+    for (const f of Array.isArray(file) ? file : file ? [file] : [...this.snapshots.keys()]) this.snapshots.delete(f);
     this.refresh();
   }
 
   async undo(file) {
-    for (const f of file ? [file] : [...this.snapshots.keys()]) {
+    for (const f of Array.isArray(file) ? file : file ? [file] : [...this.snapshots.keys()]) {
+      if (!this.snapshots.has(f)) continue;
       const original = this.snapshots.get(f);
       this.snapshots.delete(f);
       const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === f);

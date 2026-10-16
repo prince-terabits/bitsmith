@@ -76,7 +76,7 @@ function highlight(code, lang = "") {
 // ---------- state ----------
 const S = {
   models: [], commands: [], model: "default", effort: "", mode: "agent", policy: "review",
-  active: null, useActive: true, items: [], images: [], busy: false, last: null, todos: [], changes: [], sessions: [],
+  active: null, useActive: true, items: [], images: [], busy: false, last: null, todos: [], sessions: [],
 };
 let turn = null; // the response being streamed into
 let nextCheckpoint = 1;
@@ -674,7 +674,8 @@ function finalize(ms) {
     const cp = t.payload?.checkpoint;
     t.body.append(h("div", { class: "msg-actions" },
       answer && h("button", { class: "icon-btn", title: "Copy answer", onclick: () => send({ type: "copy", text: answer }) }, icon("copy")),
-      t.payload && h("button", { class: "icon-btn", title: "Retry", onclick: () => { if (!S.busy) dispatch(t.payload); } }, icon("refresh")),
+      // Retry rewinds to before this message and runs it again in place, instead of sending a duplicate.
+      t.payload && h("button", { class: "icon-btn", title: "Retry this message", onclick: () => { if (!S.busy) cp ? send({ type: "editMessage", checkpoint: cp, text: t.payload.text, retry: true }) : dispatch(t.payload); } }, icon("refresh")),
       cp && h("button", { class: "icon-btn restore-btn", title: "Restore checkpoint: undo this message's file changes and remove it and everything after", onclick: () => !S.busy && send({ type: "restore", checkpoint: cp }) }, icon("discard"))));
   }
 }
@@ -811,7 +812,7 @@ function taskEvent(m) {
 }
 
 function renderChanges() {
-  const files = S.changes;
+  const files = shown?.changes || [];
   changesPanel.classList.toggle("hidden", !files.length);
   if (!files.length) return;
   const add = files.reduce((n, f) => n + f.added, 0), del = files.reduce((n, f) => n + f.removed, 0);
@@ -903,10 +904,13 @@ function renderMeter() {
   const c = cur.context;
   meterBtn.classList.toggle("hidden", !c?.used);
   if (!c?.used) return;
-  const pct = Math.min(100, Math.round((c.used / c.window) * 100));
+  // With auto-compact on, the ring fills toward the point where Claude compacts on its own, not toward the model's window.
+  const limit = c.threshold || c.window;
+  const pct = Math.min(100, Math.round((c.used / limit) * 100));
   meterBtn.className = `context-meter ${pct >= 90 ? "crit" : pct >= 70 ? "warn" : ""}`;
   meterBtn.style.setProperty("--pct", pct);
-  meterBtn.title = `Context: ${kTok(c.used)} of ${kTok(c.window)} tokens (${pct}%)\nClick to compact: Claude summarizes the conversation so far to free up space.`;
+  const auto = c.threshold ? `Auto-compacts at ${kTok(c.threshold)} (${pct}% of the way).` : c.threshold === 0 ? "Auto-compact is off (Settings → Bitsmith: Auto Compact At)." : "";
+  meterBtn.title = `Context: ${kTok(c.used)} of ${kTok(c.window)} tokens\n${auto ? auto + "\n" : ""}Click to compact now: Claude summarizes the conversation so far to free up space.`;
   meterBtn.setAttribute("aria-label", `Context ${pct}% full. Compact conversation`);
   meterBtn.replaceChildren(h("span", { class: "ring" }), `${pct}%`);
 }
@@ -1019,7 +1023,8 @@ function makeChat(key) {
   const el = h("div", { class: "scroll hidden", role: "log", "aria-label": "Conversation" });
   el.addEventListener("scroll", flashThumb, { passive: true });
   composer.before(el);
-  const c = { key, el, turn: null, redo: null, busy: false, todos: [], tasks: [], queue: [], context: null, title: "", unread: false, attention: false };
+  const c = { key, el, turn: null, redo: null, busy: false, todos: [], tasks: [], queue: [], context: null, title: "", unread: false, attention: false,
+    changes: [], draft: { text: "", items: [], images: [], useActive: true } }; // its own files changed and its own unsent message
   chats.set(key, c);
   paneResize.observe(el);
   renderTabs();
@@ -1043,9 +1048,35 @@ function inChat(key, fn) {
   try { fn(); } finally { enter(prev); }
 }
 
+// The composer (text, attached chips and images, the current-file toggle) belongs to the chat on screen:
+// park it on the chat being left, bring back the one being shown.
+function swapDraft(from, to) {
+  if (from === to) return;
+  if (from) from.draft = { text: input.value, items: S.items, images: S.images, useActive: S.useActive };
+  const d = to.draft;
+  input.value = d.text;
+  S.items = d.items;
+  S.images = d.images;
+  S.useActive = d.useActive;
+  hidePreview();
+  renderChips();
+  autosize();
+}
+
+// Put text and chips into chat c's composer: the live one if it's on screen, else its parked draft.
+function setDraft(c, text, items) {
+  if (c !== shown) return void (c.draft = { ...c.draft, text, items });
+  input.value = text;
+  S.items = items;
+  renderChips();
+  autosize();
+  input.focus();
+}
+
 function showChat(key, tell) {
   histAt = -1; // recall restarts from the newly shown chat
   const c = chats.get(key) || makeChat(key);
+  swapDraft(shown && chats.has(shown.key) ? shown : null, c);
   enter(c);
   shown = c;
   const caughtUp = c.busy || c.unread; // it kept going while hidden: show the latest
@@ -1059,6 +1090,7 @@ function showChat(key, tell) {
   renderTasks();
   renderQueue();
   renderMeter();
+  renderChanges();
   if (caughtUp) scrollDown(true);
   placeThumb();
   if (tell) send({ type: "switchChat" });
@@ -1109,7 +1141,7 @@ function handle(m) {
     case "taskEvent": return taskEvent(m);
     case "autoTurn": if (!turn) startTurn(null); setBusy(true); working(true); return;
     case "queue": cur.queue = (m.items || []).map((p) => ({ images: [], items: [], chips: [], ...p })); return renderQueue();
-    case "context": cur.context = { used: m.used, window: m.window }; return renderMeter();
+    case "context": cur.context = { used: m.used, window: m.window, threshold: m.threshold }; return renderMeter();
     case "notice": return eventRow(h("div", { class: "task-event notice" }, icon(m.icon || "info"), h("span", { class: "grow" }, m.text)));
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
@@ -1134,7 +1166,7 @@ function handle(m) {
     case "tool": return addStep(m);
     case "toolResult": return stepResult(m);
     case "todos": S.todos = m.todos; return renderTodos();
-    case "changes": S.changes = m.files; return renderChanges();
+    case "changes": cur.changes = m.files; return cur === shown && renderChanges();
     case "permission":
       permissionCard(m);
       if (cur !== shown) { cur.attention = true; renderTabs(); } // waiting on the user in a background chat
@@ -1162,7 +1194,7 @@ function handle(m) {
       scroll.append(...redo.stack.pop());
       if (redo.stack.length) renderRedo(); // another restore can still be redone
       else dropRedo();
-      if (cur === shown) { input.value = ""; S.items = []; renderChips(); autosize(); } // the composer belongs to the chat on screen
+      setDraft(cur, "", []);
       showEmpty(false);
       return scrollDown(true);
     case "restored": {
@@ -1184,13 +1216,7 @@ function handle(m) {
         dispatch({ ...payload, text: m.resend, chips: payload.chips || [] });
         return;
       }
-      if (payload && cur === shown) {
-        input.value = payload.text === "See the attached image." ? "" : payload.text;
-        S.items = payload.items || [];
-        renderChips();
-        autosize();
-        input.focus();
-      }
+      if (payload) setDraft(cur, payload.text === "See the attached image." ? "" : payload.text, payload.items || []);
       S.todos = [];
       renderTodos();
       showEmpty(!scroll.querySelector(".turn"));

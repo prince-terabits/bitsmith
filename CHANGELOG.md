@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.10.2
+
+- **Fix: Retry sent the message again.** Retry now rewinds to just before that message and runs it again in
+  place, replacing the old reply, instead of adding a duplicate message at the end. It asks first only if file
+  changes would be reverted or later messages removed.
+
+## 1.10.1
+
+- **Fix: every chat showed the same "files changed" list.** Each chat now lists only the files it changed, and its
+  **Keep** / **Undo** (and the Keep All / Undo All commands, for the chat on screen) only touch those files. A file
+  two chats both changed shows in both. Kept or undone, it leaves both lists.
+- **Fix: the input box was shared by all chats.** Typed text, attached files and folders, pasted images and the
+  current-file toggle now belong to each chat. Switching tabs keeps each chat's unsent message, and Restore or Redo
+  in a background chat fills that chat's input, not the one on screen.
+
+## 1.10.0
+
+- **Auto-compact at 200k:** a new setting, **Bitsmith: Auto Compact At** (150k / 200k / 300k / 500k / Claude Code
+  default / Off; default 200k). The CLI already compacts on its own, but only near the model's limit (about 967k of
+  1M), so in practice it never happened and long chats were compacted by hand. Bitsmith now passes
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, so 200k compacts at about 167k; Off passes `DISABLE_AUTO_COMPACT`. Running chats
+  switch on their next message.
+- **Faster compaction:** `precomputeCompactionEnabled` is on (through `--settings`), so the summary is mostly ready
+  when it's needed.
+- **Context meter:** the ring fills toward the auto-compact point (from the CLI's `get_context_usage`), and the
+  tooltip says where it compacts, or that auto-compact is off.
+- **"Conversation auto-compacted"** notices tell automatic compactions apart from manual ones, live and in history.
+- **Fix: Restore and Edit message to a message before a compaction** (automatic or manual) silently did nothing. The
+  CLI can't resume at a message from before a compaction ("No message found with message.uuid"). Bitsmith now
+  branches from a copy of the transcript cut at that message. CLI errors like this one are now shown instead of
+  swallowed.
+
+## 1.9.0
+
+- **MCP & Skills panel** (🔌 in the chat title bar) replaces the 1.8.0 picker. An editor tab with two tabs:
+  - **MCP servers:** status, scope, type, version and tool count for each server, with an on/off switch.
+    - **Add / Edit / Remove** servers with a form: command, arguments and env for stdio, or URL and headers for
+      HTTP/SSE, saved for this folder, the project's `.mcp.json`, or all folders. It runs `claude mcp add-json` and
+      `claude mcp remove`, then restarts idle chats so they load the change. A failed edit puts the old server back.
+    - **Sign in / Sign out** for HTTP/SSE servers (`mcp_authenticate` opens the browser; `mcp_clear_auth`).
+    - **Why it failed:** the server's error, plus a hint for common causes (command not on PATH, refused
+      credentials, timeout, nothing listening, waiting for approval), with a Retry button.
+    - **Permissions:** expand a server to see its tools, with read-only and destructive tags. Set Allow, Always ask
+      or Block for one tool or the whole server. The rules go to `permissions` in `.claude/settings.local.json`,
+      and running chats apply them at once.
+  - **Skills:** each skill gets On, Name only, Only when I type /name, or Off (`skillOverrides`). A token budget
+    shows what skill listings cost every chat and what the current levels save. There's a filter box.
+
 ## 1.8.0
 
 - **Edit plan:** the plan approval card has an **Edit plan** button that opens the plan as a Markdown file. Approve,

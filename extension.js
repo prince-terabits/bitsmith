@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const { spawn } = require("child_process");
+const { ToolsPanel } = require("./tools");
 const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
@@ -40,6 +41,12 @@ function claudeBin() {
   return [path.join(home, ".local", "bin", exe), path.join(home, ".claude", "local", exe)].find((p) => fs.existsSync(p)) || bin;
 }
 
+// When the CLI compacts on its own. By default it waits until the model's window is nearly full (~967k of 1M), far past
+// where long chats get slow and costly; CLAUDE_CODE_AUTO_COMPACT_WINDOW makes it compact at that size minus a summary buffer.
+function autoCompactAt() {
+  return vscode.workspace.getConfiguration("bitsmith").get("autoCompactAt") || "200000";
+}
+
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
   constructor({ cwd, model, effort, resume, resumeAt, onMessage, onExit }) {
@@ -59,11 +66,19 @@ class Claude {
       args.push("--mcp-config", JSON.stringify({ mcpServers: { browser: server } }),
         "--allowedTools", "mcp__browser__browser_snapshot,mcp__browser__browser_screenshot,mcp__browser__browser_console"); // looking never asks; acting does
     }
+    const compactAt = autoCompactAt();
+    const env = { ...process.env };
+    if (compactAt === "off") env.DISABLE_AUTO_COMPACT = "1";
+    else {
+      if (/^\d+$/.test(compactAt)) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = compactAt;
+      args.push("--settings", JSON.stringify({ precomputeCompactionEnabled: true })); // the summary is mostly ready when it's needed
+    }
+    this.compactAt = compactAt;
     this.effort = effort;
     this.waiting = new Map();
     this.stderr = "";
     const bin = claudeBin();
-    this.proc = spawn(bin, args, { cwd, env: process.env });
+    this.proc = spawn(bin, args, { cwd, env });
     this.proc.on("error", (e) => onExit(`Could not start Claude Code (${bin}): ${e.message}` +
       (e.code === "ENOENT" ? ". Install it, or set bitsmith.claudePath to its full path." : "")));
     this.proc.stderr.on("data", (d) => (this.stderr += d));
@@ -114,7 +129,8 @@ class Chat {
     this.busy = false;
     this.pending = new Map(); // permission request id -> { req, diff }
     this.tools = new Map(); // tool_use id -> { name, input }
-    this.bashMarks = new Map(); // Bash tool_use id -> git snapshots of the repos it may touch, taken just before it ran
+    this.bashMarks = new Map();
+    this.touched = new Set(); // files this chat changed: its own "files changed" list, Keep all and Undo all // Bash tool_use id -> git snapshots of the repos it may touch, taken just before it ran
     this.checkpoints = []; // one per live message: { id, sessionId, resumeAt, snaps: Map(file -> text | null) }
     this.lastUuid = null; // last top-level assistant message, the point to rewind the conversation to
     this.userCount = 0; // messages sent since lastUuid; with it, a key for each message that survives reopening and forks
@@ -142,6 +158,10 @@ class Chat {
 
   ensure() {
     if (this.claude || !this.folder) return this.claude;
+    if (this.sessionId && this.resumeAt) { // rewinding past a compaction: the CLI can't find that message, so branch from a copy
+      const cut = cutBeforeCompaction(this.sessionDir(), this.sessionId, this.resumeAt);
+      if (cut) { this.sessionId = cut; this.resumeAt = null; }
+    }
     const s = this.settings();
     const claude = new Claude({
       cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt,
@@ -159,7 +179,7 @@ class Chat {
     claude.mode = "default";
     this.claude = claude;
     this.resumeAt = null;
-    claude.request({ subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => this.p.onInit(r));
+    claude.request({ subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
     this.syncSettings();
     return claude;
   }
@@ -238,7 +258,7 @@ class Chat {
     if (this.busy) return;
     this.busy = true;
     await vscode.workspace.saveAll(false); // Claude reads files from disk, so unsaved edits would be invisible to it
-    if (this.claude && (this.claude.effort || "") !== this.settings().effort) this.restart(); // effort is a launch flag
+    if (this.claude && ((this.claude.effort || "") !== this.settings().effort || this.claude.compactAt !== autoCompactAt())) this.restart(); // launch flags
     const claude = this.ensure();
     this.syncSettings();
     this.started = Date.now();
@@ -283,8 +303,10 @@ class Chat {
       this.p.setUsage(m.rate_limit_info);
     } else if (m.type === "result") {
       if (m.is_error && m.subtype !== "error_during_execution") this.post({ type: "error", text: m.result || "Claude Code reported an error." });
+      else if (m.is_error && !m.num_turns && this.claude?.stderr.trim()) this.post({ type: "error", text: this.claude.stderr.trim().split("\n").pop() }); // failed before starting, e.g. a bad --resume
       for (const [model, u] of Object.entries(m.modelUsage || {})) if (u.contextWindow) this.p.rememberWindow(model, u.contextWindow);
       this.setContext(this.context.used, this.model);
+      this.refreshThreshold(); // the model may have changed
       if (this.busy) this.finish({ cost: m.total_cost_usd });
     } else if (m.type === "control_request") {
       if (m.request.subtype === "can_use_tool") this.ask(m.request_id, m.request);
@@ -298,7 +320,7 @@ class Chat {
     if (m.subtype === "status" && m.status === "compacting") this.post({ type: "status", text: "Compacting conversation…" });
     if (m.subtype === "compact_boundary") {
       const meta = m.compact_metadata || {};
-      this.post({ type: "notice", icon: "fold", text: compactText(meta.pre_tokens, meta.post_tokens) });
+      this.post({ type: "notice", icon: "fold", text: compactText(meta.pre_tokens, meta.post_tokens, meta.trigger) });
       this.setContext(meta.post_tokens || 0, this.model);
     }
     if (m.subtype === "background_tasks_changed") {
@@ -324,8 +346,18 @@ class Chat {
 
   setContext(used, model) {
     if (model) this.model = model;
-    this.context = { used, window: this.p.windowFor(this.model) };
+    this.context = { used, window: this.p.windowFor(this.model), threshold: this.threshold };
     this.post({ type: "context", ...this.context });
+  }
+
+  // Where the CLI will compact on its own (0 when auto-compact is off), for the context meter.
+  refreshThreshold() {
+    const claude = this.claude;
+    claude?.request({ subtype: "get_context_usage", detail: "summary" }).then((r) => {
+      if (this.claude !== claude || r.subtype !== "success" || !r.response) return;
+      this.threshold = r.response.isAutoCompactEnabled ? r.response.autoCompactThreshold || 0 : 0;
+      this.setContext(this.context.used, this.model);
+    });
   }
 
   setTasks(list) {
@@ -371,7 +403,7 @@ class Chat {
   // Before any agent write: remember the file for Keep/Undo and for this message's checkpoint.
   snapshot(file) {
     if (!file) return;
-    if (this.p.inFolder(file)) this.edits.snapshot(file); // scratch files elsewhere (e.g. /tmp) aren't changes to review
+    if (this.p.inFolder(file)) { this.edits.snapshot(file); this.touched.add(norm(file)); } // scratch files elsewhere (e.g. /tmp) aren't changes to review
     const cp = this.checkpoints[this.checkpoints.length - 1];
     if (cp && !cp.snaps.has(file)) {
       try { cp.snaps.set(file, fs.readFileSync(file, "utf8")); } catch { cp.snaps.set(file, null); }
@@ -380,7 +412,7 @@ class Chat {
 
   // Same as snapshot(), with the pre-change text already known.
   snapshotText(file, text) {
-    if (this.p.inFolder(file)) this.edits.snapshotText(file, text);
+    if (this.p.inFolder(file)) { this.edits.snapshotText(file, text); this.touched.add(norm(file)); }
     const cp = this.checkpoints[this.checkpoints.length - 1];
     if (cp && !cp.snaps.has(file)) cp.snaps.set(file, text);
   }
@@ -457,7 +489,7 @@ class Chat {
   }
 
   // Put files and the conversation back to how they were just before checkpoint `id`'s message.
-  async restore(id, { edit } = {}) {
+  async restore(id, { edit, retry } = {}) {
     const idx = this.checkpoints.findIndex((c) => c.id === id);
     if (idx < 0 || this.busy) return;
     const later = this.checkpoints.slice(idx);
@@ -470,12 +502,14 @@ class Chat {
     const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
     const what = [edited && `${plural(edited, "file")} the agent edited`, shell && `${plural(shell, "file")} changed by commands`].filter(Boolean).join(" and ") || "no files";
     // Editing a message only needs a confirm when files would be reverted; a plain restore always asks.
-    if (!edit || files.size) {
+    if (!edit || files.size || (retry && messages > 1)) {
       const pick = await vscode.window.showWarningMessage(
-        edit
+        retry
+          ? `Retry this message? This reverts ${what} from this message on${messages > 1 ? ` and removes the ${plural(messages - 1, "message")} after it` : ""}.`
+          : edit
           ? `Edit and resend? This reverts ${what} from this message on and removes ${plural(messages, "message")}.`
           : `Restore checkpoint? This removes ${plural(messages, "message")} and reverts ${what} since then.`,
-        { modal: true, detail: "Command changes come from git snapshots, so edits to untracked or ignored files that already existed aren't covered." }, edit ? "Edit and resend" : "Restore");
+        { modal: true, detail: "Command changes come from git snapshots, so edits to untracked or ignored files that already existed aren't covered." }, retry ? "Retry" : edit ? "Edit and resend" : "Restore");
       if (!pick) return this.post({ type: "editCancelled", checkpoint: id });
     }
     if (this.busy) return this.post({ type: "editCancelled", checkpoint: id }); // Claude started replying meanwhile
@@ -678,7 +712,13 @@ class ChatProvider {
     this.lastFile = null;
     this.usage = this.state.get("usage", null); // last plan-limit reading from the CLI, kept across restarts
     this.plan = this.state.get("plan", "");
-    this.edits = new EditTracker((files) => this.post({ type: "changes", files: files.map((f) => ({ ...f, rel: this.rel(f.file) })) }));
+    // Each chat lists only the files it changed. A file that's been kept or undone leaves every chat's list.
+    this.edits = new EditTracker((files) => {
+      for (const c of this.chats.values()) {
+        for (const f of c.touched) if (!this.edits.snapshots.has(f)) c.touched.delete(f);
+        c.post({ type: "changes", files: files.filter((f) => c.touched.has(f.file)).map((f) => ({ ...f, rel: this.rel(f.file) })) });
+      }
+    });
     this.chats = new Map(); // key -> Chat, in tab order
     this.nextKey = 1;
     this.active = this.createChat();
@@ -973,8 +1013,8 @@ class ChatProvider {
       case "dragdbg": return fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} [${m.chat}] ${m.line}\n`); // TEMP drag debug
       case "drop": fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} host got drop: ${JSON.stringify(m.uris)}\n`); return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)), c);
       case "pastePaths": return this.pastePaths(m.paths, c);
-      case "keep": return this.edits.keep(m.file);
-      case "undo": return this.edits.undo(m.file);
+      case "keep": return this.edits.keep(m.file || [...c.touched]); // no file: everything this chat changed
+      case "undo": return this.edits.undo(m.file || [...c.touched]);
       case "diffFile": return this.edits.showDiff(m.file);
       case "copy": return vscode.env.clipboard.writeText(m.text);
       case "history": return this.history();
@@ -986,7 +1026,7 @@ class ChatProvider {
       case "stopTask": return c.stopTask(m.taskId);
       case "taskOutput": return c.taskOutput(m.taskId);
       case "restore": return c.restore(m.checkpoint);
-      case "editMessage": return c.restore(m.checkpoint, { edit: m.text });
+      case "editMessage": return c.restore(m.checkpoint, { edit: m.text, retry: m.retry });
       case "redo": return c.redo();
       case "refreshUsage": return this.fetchUsage(true);
       case "openUsagePage": return vscode.env.openExternal(vscode.Uri.parse("https://claude.ai/settings/usage"));
@@ -1252,59 +1292,6 @@ class ChatProvider {
     }
     this.addItems(items, c);
     if (rest.length) (c?.panel ? c.panel.webview : this.view?.webview)?.postMessage({ type: "insertText", text: rest.join("\n") });
-  }
-
-  // MCP servers and skills, ticked when on. Servers toggle through the CLI (saved per project in ~/.claude.json);
-  // skills through skillOverrides in the folder's .claude/settings.local.json, which the CLI's update_settings won't write.
-  async manageTools(c = this.current()) {
-    const claude = c.ensure();
-    if (!claude) return vscode.window.showInformationMessage("Open a folder first.");
-    const qp = vscode.window.createQuickPick();
-    qp.canSelectMany = true;
-    qp.matchOnDescription = true;
-    qp.placeholder = "Tick the MCP servers and skills Claude can use in this folder";
-    qp.busy = true;
-    qp.show();
-    const reconnect = { iconPath: new vscode.ThemeIcon("refresh"), tooltip: "Reconnect" };
-    const load = async () => {
-      const [mcp, sk] = await Promise.all([claude.request({ subtype: "mcp_status" }), claude.request({ subtype: "get_skills_dialog" })]);
-      const servers = (mcp.response?.mcpServers || []).map((s) => ({ label: `$(server) ${s.name}`, description: `${s.status} · ${s.scope}`, server: s.name, on: s.status !== "disabled",
-        buttons: s.status === "failed" || s.status === "needs-auth" ? [reconnect] : [] }));
-      const skills = (sk.response?.skills || []).map((s) => ({ label: `$(sparkle) ${s.display_name || s.name}`, description: `${s.source} · ~${s.tokens} tokens · ${s.description || ""}`, skill: s.name, on: s.state !== "off" }));
-      qp.items = [{ label: "MCP servers", kind: vscode.QuickPickItemKind.Separator }, ...servers, { label: "Skills", kind: vscode.QuickPickItemKind.Separator }, ...skills];
-      qp.selectedItems = qp.items.filter((i) => i.on);
-      qp.busy = false;
-    };
-    qp.onDidTriggerItemButton(async ({ item }) => {
-      qp.busy = true;
-      const r = await claude.request({ subtype: "mcp_reconnect", serverName: item.server });
-      if (r.subtype !== "success") vscode.window.showWarningMessage(`${item.server}: ${r.error || "couldn't reconnect"}`);
-      await load();
-    });
-    qp.onDidAccept(async () => {
-      const picked = new Set(qp.selectedItems);
-      const changed = qp.items.filter((i) => i.kind !== vscode.QuickPickItemKind.Separator && picked.has(i) !== i.on);
-      qp.hide();
-      if (!changed.length) return;
-      const live = [...new Set([this.active, ...this.chats.values()])].map((x) => x?.claude).filter(Boolean);
-      for (const i of changed.filter((i) => i.server)) for (const cl of live) await cl.request({ subtype: "mcp_toggle", serverName: i.server, enabled: !i.on });
-      const skills = changed.filter((i) => i.skill);
-      if (skills.length) {
-        const file = path.join(this.folder, ".claude", "settings.local.json");
-        let settings = {};
-        try { if (fs.existsSync(file)) settings = JSON.parse(fs.readFileSync(file, "utf8")); }
-        catch { return vscode.window.showErrorMessage(`Bitsmith didn't change skills: ${file} isn't valid JSON.`); }
-        const o = settings.skillOverrides = settings.skillOverrides || {};
-        for (const i of skills) if (i.on) o[i.skill] = "off"; else delete o[i.skill];
-        if (!Object.keys(o).length) delete settings.skillOverrides;
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
-        for (const cl of live) await cl.request({ subtype: "reload_skills" });
-      }
-      vscode.window.showInformationMessage(`Bitsmith: ${changed.map((i) => `${i.server || i.skill} ${i.on ? "off" : "on"}`).join(", ")}.`);
-    });
-    qp.onDidHide(() => qp.dispose());
-    load().catch((e) => { qp.hide(); vscode.window.showErrorMessage(`Bitsmith couldn't list MCP servers and skills: ${e.message}`); });
   }
 
   addSelection() {
@@ -1575,8 +1562,23 @@ function contextTokens(u) {
 }
 
 const kTokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n || 0}`);
-function compactText(pre, post) {
-  return pre ? `Conversation compacted · ${kTokens(pre)} → ${kTokens(post)} tokens` : "Conversation compacted";
+// A resumed session only loads messages after its last compaction, so --resume-session-at can't reach a message before
+// one ("No message found with message.uuid"). Copy the transcript up to that message into a new session and resume that.
+function cutBeforeCompaction(dir, sessionId, uuid) {
+  const file = path.join(dir, sessionId + ".jsonl");
+  let lines;
+  try { lines = fs.readFileSync(file, "utf8").split("\n"); } catch { return null; }
+  const at = lines.findIndex((l) => l.includes(uuid) && (() => { try { return JSON.parse(l).uuid === uuid; } catch { return false; } })());
+  if (at < 0 || !lines.slice(at + 1).some((l) => l.includes('"compact_boundary"'))) return null;
+  const id = require("crypto").randomUUID();
+  const kept = lines.slice(0, at + 1).map((l) => { try { const e = JSON.parse(l); if (e.sessionId) e.sessionId = id; return JSON.stringify(e); } catch { return l; } });
+  fs.writeFileSync(path.join(dir, id + ".jsonl"), kept.join("\n") + "\n");
+  return id;
+}
+
+function compactText(pre, post, trigger) {
+  const what = trigger === "auto" ? "Conversation auto-compacted" : "Conversation compacted";
+  return pre ? `${what} · ${kTokens(pre)} → ${kTokens(post)} tokens` : what;
 }
 
 // Context size at the end of a saved chat: the last reply's usage, or what a later compaction left.
@@ -1714,7 +1716,7 @@ function replay(file, rel) {
     if (e.isSidechain) continue;
     const note = taskNotification(e);
     if (note) { items.push(note); continue; }
-    if (e.type === "system" && e.subtype === "compact_boundary") { items.push({ type: "notice", icon: "fold", text: compactText(e.compactMetadata?.preTokens, e.compactMetadata?.postTokens) }); continue; }
+    if (e.type === "system" && e.subtype === "compact_boundary") { items.push({ type: "notice", icon: "fold", text: compactText(e.compactMetadata?.preTokens, e.compactMetadata?.postTokens, e.compactMetadata?.trigger) }); continue; }
     const t = userText(e);
     if (t) {
       let images = imagesOf(e);
@@ -1858,6 +1860,8 @@ function activate(context) {
   migrateFromMyAgent(context);
   storageDir = context.globalStorageUri.fsPath;
   const provider = new ChatProvider(context);
+  const tools = new ToolsPanel(provider, context.extensionUri, claudeBin);
+  provider.tools = tools;
   const status = vscode.window.createStatusBarItem("bitsmith.status", vscode.StatusBarAlignment.Right, 100);
   status.name = "Bitsmith";
   status.command = "bitsmith.showUsage";
@@ -1880,7 +1884,7 @@ function activate(context) {
     vscode.window.onDidChangeTextEditorSelection(activeChanged),
     vscode.commands.registerCommand("bitsmith.newChat", () => provider.newChat()),
     vscode.commands.registerCommand("bitsmith.history", () => provider.history()),
-    vscode.commands.registerCommand("bitsmith.manageTools", () => provider.manageTools()),
+    vscode.commands.registerCommand("bitsmith.manageTools", () => tools.open()),
     vscode.commands.registerCommand("bitsmith.exportChat", () => provider.exportChat(provider.current())),
     vscode.commands.registerCommand("bitsmith.openInEditor", () => provider.openInEditor()),
     vscode.commands.registerCommand("bitsmith.commitMessage", (repo) => provider.commitMessage(repo)),
@@ -1898,8 +1902,8 @@ function activate(context) {
       const live = [provider.active, ...provider.chats.values()].map((c) => c.claude?.browserState).filter((f) => f && fs.existsSync(f));
       live.length ? showBrowser(live[0]) : vscode.window.showInformationMessage("No chat has the browser open. Turn on Settings → Bitsmith → Browser and ask Claude to open a page.");
     }),
-    vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep()),
-    vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo()),
+    vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep([...provider.current().touched])),
+    vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo([...provider.current().touched])),
     { dispose: () => provider.shutdown() },
   );
   return provider;

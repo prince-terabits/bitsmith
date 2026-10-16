@@ -360,6 +360,29 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   const usagePost = posts.filter((m) => m.type === "usage").pop();
   assert.strictEqual(usagePost.usage.weekly.used, 0.3);
   console.log("usage status bar ok");
+
+  // Each chat lists only the files it changed; Keep all / Undo all in one chat leave the other's alone
+  {
+    const a = provider.createChat(), b = provider.createChat();
+    fs.writeFileSync("pa.txt", "a\n"); fs.writeFileSync("pb.txt", "b\n");
+    a.snapshot(path.join(cwd, "pa.txt")); fs.writeFileSync("pa.txt", "A\n");
+    b.snapshot(path.join(cwd, "pb.txt")); fs.writeFileSync("pb.txt", "B\n");
+    const st = posts.length;
+    provider.edits.refresh();
+    const last = async (c) => { await waitFor((m) => m.type === "changes" && m.chat === c.key, st, 3000); return posts.filter((m) => m.type === "changes" && m.chat === c.key).pop().files.map((f) => f.rel); };
+    assert.deepStrictEqual(await last(a), ["pa.txt"], "chat A sees only its file");
+    assert.deepStrictEqual(await last(b), ["pb.txt"], "chat B sees only its file");
+    await provider.onWebview({ type: "undo", chat: a.key });
+    assert.strictEqual(fs.readFileSync("pa.txt", "utf8"), "a\n", "Undo all in A reverts A's file");
+    assert.strictEqual(fs.readFileSync("pb.txt", "utf8"), "B\n", "and leaves B's change");
+    const st2 = posts.length;
+    provider.edits.refresh();
+    await waitFor((m) => m.type === "changes" && m.chat === b.key, st2, 3000);
+    assert.deepStrictEqual(posts.filter((m) => m.type === "changes" && m.chat === b.key).pop().files.map((f) => f.rel), ["pb.txt"]);
+    provider.onWebview({ type: "keep", chat: b.key });
+    for (const c of [a, b]) { provider.chats.delete(c.key); c.shutdown(); }
+    console.log("per-chat changes ok");
+  }
   if (process.argv.includes("--live-usage")) {
     provider.onWebview({ type: "ready" });
     provider.setSetting("model", "haiku");
@@ -440,26 +463,126 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert(/edited by user[^"]*EDITED-BY-USER/.test(log), "Claude got the edited plan");
     console.log("edit plan ok");
 
-    // the picker lists servers and skills; unticking a skill writes skillOverrides and the CLI reports it off
-    let qp;
-    vscode.window.createQuickPick = () => (qp = { items: [], selectedItems: [], show() {}, hide() { this.onHide?.(); }, dispose() {},
-      onDidTriggerItemButton() {}, onDidAccept(f) { this.accept = f; }, onDidHide(f) { this.onHide = f; } });
-    await provider.manageTools();
-    await waitFor(() => qp.busy === false, 0, 30000);
-    const skill = qp.items.find((i) => i.skill && i.on);
-    assert(skill, "skills listed: " + JSON.stringify(qp.items.map((i) => i.label)));
-    assert(qp.items.some((i) => i.label === "MCP servers"), "MCP section listed");
-    qp.selectedItems = qp.selectedItems.filter((i) => i !== skill);
-    await qp.accept();
-    assert.strictEqual(JSON.parse(fs.readFileSync(".claude/settings.local.json", "utf8")).skillOverrides[skill.skill], "off");
-    const r = await provider.active.claude.request({ subtype: "get_skills_dialog" });
-    assert.strictEqual(r.response.skills.find((s) => s.name === skill.skill).state, "off", "the running CLI sees it off");
-    await provider.manageTools();
-    await waitFor(() => qp.busy === false, 0, 30000);
-    qp.selectedItems = qp.items.filter((i) => i.on || i.skill === skill.skill);
-    await qp.accept();
-    assert(!fs.readFileSync(".claude/settings.local.json", "utf8").includes("skillOverrides"), "turning it back on removes the override");
-    console.log("mcp & skills ok:", skill.skill);
+    // The MCP & Skills panel, driven by its messages: a tiny MCP server is added, connects, lists its tool and gets a
+    // permission; a broken one shows its error; skills change level; edit and remove go through `claude mcp`.
+    const panelPosts = [];
+    let onPanel;
+    vscode.ViewColumn = { Active: -1 };
+    vscode.window.createWebviewPanel = () => ({ webview: { asWebviewUri: (u) => u, cspSource: "", postMessage: (m) => panelPosts.push(m), onDidReceiveMessage: (f) => { onPanel = f; } }, onDidDispose() {}, reveal() {} });
+    vscode.Uri.joinPath = (...a) => a.join("/");
+    vscode.window.showWarningMessage = async () => "Remove";
+    const tp = provider.tools;
+    const data = async (pred, label) => { // refresh until the panel's data passes
+      for (let i = 0; i < 40; i++) {
+        const st = panelPosts.length;
+        await tp.handle({ type: "refresh" });
+        const d = panelPosts.slice(st).find((m) => m.type === "data");
+        if (d && pred(d)) return d;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      throw new Error("panel data never showed: " + label + " " + JSON.stringify(panelPosts.filter((m) => m.type !== "data").slice(-3)));
+    };
+    tp.open();
+    onPanel({ type: "ready" });
+    let d = await data((x) => x.skills.length, "skills");
+    const skill = d.skills.find((s) => s.state === "on");
+    await tp.handle({ type: "setSkill", name: skill.name, state: "name-only" });
+    assert.strictEqual(JSON.parse(fs.readFileSync(".claude/settings.local.json", "utf8")).skillOverrides[skill.name], "name-only");
+    d = await data((x) => x.skills.find((s) => s.name === skill.name).state === "name-only", "skill name-only");
+    await tp.handle({ type: "setSkill", name: skill.name, state: "on" });
+    assert(!fs.readFileSync(".claude/settings.local.json", "utf8").includes("skillOverrides"), "back on removes the override");
+    console.log("skill levels ok:", skill.name);
+
+    fs.writeFileSync("mcp-echo.js", `require("readline").createInterface({ input: process.stdin }).on("line", (l) => {
+      const m = JSON.parse(l); if (m.id === undefined) return;
+      const result = m.method === "initialize" ? { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "echo", version: "1.2.3" } }
+        : m.method === "tools/list" ? { tools: [{ name: "shout", description: "Shouts back", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }] } : {};
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result }) + "\\n");
+    });`);
+    await tp.handle({ type: "saveServer", name: "bs-echo", scope: "local", config: { type: "stdio", command: "node", args: [path.join(cwd, "mcp-echo.js")] } });
+    await tp.handle({ type: "saveServer", name: "bs-broken", scope: "local", config: { type: "stdio", command: "bitsmith-no-such-command" } });
+    d = await data((x) => x.servers.find((s) => s.name === "bs-echo")?.status === "connected" && x.servers.find((s) => s.name === "bs-broken")?.status === "failed", "echo connected, broken failed");
+    const echo = d.servers.find((s) => s.name === "bs-echo");
+    assert.deepStrictEqual(echo.tools.map((t) => t.name), ["shout"], "tools listed");
+    assert(echo.editable && echo.serverInfo.version === "1.2.3");
+    console.log("add server ok; broken server error:", d.servers.find((s) => s.name === "bs-broken").error);
+
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo__shout", value: "allow" });
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo", value: "ask" });
+    let perms = JSON.parse(fs.readFileSync(".claude/settings.local.json", "utf8")).permissions;
+    assert(perms.allow.includes("mcp__bs-echo__shout") && perms.ask.includes("mcp__bs-echo"), JSON.stringify(perms));
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo__shout", value: "" });
+    perms = JSON.parse(fs.readFileSync(".claude/settings.local.json", "utf8")).permissions;
+    assert(!perms.allow.includes("mcp__bs-echo__shout"));
+    // the running CLI obeys it: allowed runs without a card, blocked never runs
+    provider.setSetting("policy", "review");
+    provider.setSetting("mode", "agent");
+    let cards = 0;
+    onPerm = (m) => { cards++; provider.onWebview({ type: "permission", id: m.id, allow: false }); };
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo", value: "" }); // a server-wide "ask" would win over the tool's allow
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo__shout", value: "allow" });
+    let q = await turn("Call the mcp__bs-echo__shout tool once with no arguments, then reply just DONE.");
+    assert(q.some((m) => m.type === "tool" && /shout/.test(m.name || m.title || "")) && cards === 0, "allowed tool runs without asking; cards: " + cards);
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo__shout", value: "deny" });
+    q = await turn("Call the mcp__bs-echo__shout tool once with no arguments, then reply just DONE.");
+    assert(cards === 0 && !q.some((m) => m.type === "permission"), "blocked tool never asks");
+    await tp.handle({ type: "setRule", rule: "mcp__bs-echo__shout", value: "" });
+    console.log("tool permissions ok (allow + block applied live)");
+
+    await tp.handle({ type: "toggleServer", name: "bs-echo", enabled: false });
+    await data((x) => x.servers.find((s) => s.name === "bs-echo")?.status === "disabled", "echo disabled");
+    await tp.handle({ type: "toggleServer", name: "bs-echo", enabled: true });
+    await tp.handle({ type: "saveServer", name: "bs-echo2", scope: "local", config: echo.config, old: { name: "bs-echo", scope: "local", config: echo.config } });
+    d = await data((x) => x.servers.some((s) => s.name === "bs-echo2") && !x.servers.some((s) => s.name === "bs-echo"), "renamed");
+    for (const name of ["bs-echo2", "bs-broken"]) await tp.handle({ type: "removeServer", name, scope: "local" });
+    await data((x) => !x.servers.some((s) => s.name.startsWith("bs-")), "removed");
+    console.log("toggle + edit + remove ok");
+    provider.shutdown();
+    process.exit(0);
+  }
+
+  // Auto-compact: with a tiny limit the real CLI compacts on its own; the meter knows the threshold, the notice says "auto".
+  if (process.argv.includes("--live-compact")) {
+    const base = vscode.workspace.getConfiguration;
+    vscode.workspace.getConfiguration = () => ({ get: (k) => (k === "autoCompactAt" ? "100000" : base().get(k)) });
+    provider.onWebview({ type: "ready" });
+    provider.setSetting("model", "haiku");
+    provider.setSetting("policy", "bypass");
+    const ch = provider.active;
+    const st = posts.length;
+    await turn("Reply with just OK.");
+    const ctx = await waitFor((m) => m.type === "context" && m.threshold > 0, st, 30000);
+    assert(ctx.threshold < 100000, "threshold below the 100k limit: " + ctx.threshold); // the CLI won't go under a 100k window
+    const words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore".split(" ");
+    for (const f of ["big1.txt", "big2.txt", "big3.txt"]) fs.writeFileSync(f, Array.from({ length: 1400 }, (_, i) => `${i} ` + Array.from({ length: 12 }, (_, j) => words[(i * 7 + j * 3) % words.length] + ((i + j) % 97)).join(" ")).join("\n"));
+    console.log("threshold on the meter ok:", ctx.threshold, "used", ctx.used);
+    vscode.window.showWarningMessage = async () => "Restore";
+    const s0 = posts.length;
+    provider.onWebview({ type: "send", chat: ch.key, context: [], text: "Use the Write tool to create note.txt containing exactly: BEFORE", checkpoint: 801 });
+    await waitFor((m) => m.type === "done", s0);
+    assert(fs.existsSync("note.txt"), "note written");
+    let auto;
+    for (let i = 0; i < 6 && !auto; i++) {
+      const p = await turn(`Read ${["big1.txt", "big2.txt", "big3.txt"][i % 3]} with the Read tool (the whole file), then reply just OK.`);
+      auto = p.find((m) => m.type === "notice" && /auto-compacted/.test(m.text));
+    }
+    assert(auto, "the CLI auto-compacted");
+    console.log("auto-compact ok:", auto.text);
+    const items = ext.replay(path.join(provider.sessionDir(), ch.sessionId + ".jsonl"), (f) => f);
+    assert(items.some((i) => i.type === "notice" && /auto-compacted/.test(i.text)), "history shows it as auto");
+    // Restore to a message from before the compaction: files go back and the conversation continues from there
+    await provider.restore(801);
+    assert(!fs.existsSync("note.txt"), "restore across a compaction reverts the file");
+    const after = await turn("Reply with just the word PONG.");
+    assert(/PONG/.test(said(after)) && !after.some((m) => m.type === "error"), "the chat continues after restoring past a compaction: " + JSON.stringify(after.map((m) => m.type + (m.text ? ":" + String(m.text).slice(0, 120) : ""))));
+    const t2 = fs.readFileSync(path.join(provider.sessionDir(), ch.sessionId + ".jsonl"), "utf8");
+    assert(/BEFORE/.test(t2) && !/compact_boundary/.test(t2.split("PONG")[0].split("BEFORE").pop()), "the branch keeps the early messages and drops the compaction");
+    console.log("restore across auto-compact ok");
+    vscode.workspace.getConfiguration = () => ({ get: (k) => (k === "autoCompactAt" ? "off" : base().get(k)) });
+    const st2 = posts.length;
+    await turn("Reply with just OK.");
+    await waitFor((m) => m.type === "context" && m.threshold === 0, st2, 30000);
+    console.log("off: meter says auto-compact is off ok");
     provider.shutdown();
     process.exit(0);
   }
