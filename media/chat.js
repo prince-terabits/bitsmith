@@ -331,6 +331,7 @@ input.addEventListener("keydown", (e) => {
     if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pickSlash(list[slashIndex]); }
     if (e.key === "Escape") { input.value = ""; return renderSlash(); }
   }
+  if (e.key === "Tab" && !e.shiftKey && !input.value && cur.suggestion && !S.busy) { e.preventDefault(); input.value = cur.suggestion; return autosize(); }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
   // shell-style recall: Up on the first line / Down on the last line walks past prompts
   const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
@@ -811,23 +812,29 @@ function taskEvent(m) {
   scrollDown();
 }
 
+const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+// A binary file (an image, say) has no lines to count, so it shows its size instead.
+const binaryStats = (f) => f.created ? `new · ${size(f.after)}` : f.deleted ? `deleted · ${size(f.before)}` : `${size(f.before)} → ${size(f.after)}`;
+
 function renderChanges() {
   const files = shown?.changes || [];
   changesPanel.classList.toggle("hidden", !files.length);
   if (!files.length) return;
-  const add = files.reduce((n, f) => n + f.added, 0), del = files.reduce((n, f) => n + f.removed, 0);
+  const add = files.reduce((n, f) => n + f.added, 0), del = files.reduce((n, f) => n + f.removed, 0), bins = files.filter((f) => f.binary).length;
   const open = changesPanel.querySelector("details")?.open ?? false;
   changesPanel.replaceChildren(h("details", { open },
-    h("summary", {}, icon("chevron-right", "chev"), `${files.length} file${files.length === 1 ? "" : "s"} changed`, h("span", { class: "add" }, ` +${add}`), h("span", { class: "del" }, ` -${del}`), h("span", { class: "grow" }),
+    h("summary", {}, icon("chevron-right", "chev"), `${files.length} file${files.length === 1 ? "" : "s"} changed`, bins < files.length && h("span", { class: "add" }, ` +${add}`), bins < files.length && h("span", { class: "del" }, ` -${del}`),
+      bins > 0 && h("span", { class: "muted" }, ` · ${bins} binary`), h("span", { class: "grow" }),
       h("button", { class: "primary small", onclick: (e) => { e.preventDefault(); send({ type: "keep" }); } }, "Keep"),
       h("button", { class: "small", onclick: (e) => { e.preventDefault(); send({ type: "undo" }); } }, "Undo")),
     h("div", { class: "file-list" }, files.map((f) => h("div", { class: "file-row file-link", role: "button", tabindex: "0", "data-file": f.file, title: f.rel },
-      icon(f.created ? "new-file" : f.deleted ? "trash" : "file", "file-icon"),
+      icon(f.created ? "new-file" : f.deleted ? "trash" : f.binary ? "file-media" : "file", "file-icon"),
       h("span", { class: "file-name" }, base(f.rel)),
       h("span", { class: "file-dir" }, dir(f.rel)),
-      h("span", { class: "file-stats" }, h("span", { class: "add" }, `+${f.added}`), h("span", { class: "del" }, `-${f.removed}`)),
+      f.binary ? h("span", { class: "file-stats muted" }, binaryStats(f))
+        : h("span", { class: "file-stats" }, h("span", { class: "add" }, `+${f.added}`), h("span", { class: "del" }, `-${f.removed}`)),
       h("span", { class: "row-actions" },
-        h("button", { class: "icon-btn", title: "View diff", onclick: (e) => { e.stopPropagation(); send({ type: "diffFile", file: f.file }); } }, icon("diff")),
+        !(f.binary && (f.created || f.deleted)) && h("button", { class: "icon-btn", title: "View diff", onclick: (e) => { e.stopPropagation(); send({ type: "diffFile", file: f.file }); } }, icon("diff")),
         h("button", { class: "icon-btn", title: "Keep", onclick: (e) => { e.stopPropagation(); send({ type: "keep", file: f.file }); } }, icon("check")),
         h("button", { class: "icon-btn", title: "Undo", onclick: (e) => { e.stopPropagation(); send({ type: "undo", file: f.file }); } }, icon("discard"))))))));
 }
@@ -836,14 +843,21 @@ function renderChanges() {
 function setBusy(on) {
   S.busy = on;
   cur.busy = on;
+  if (on) cur.suggestion = null; // a new turn makes the old guess stale
   renderTabs();
   if (cur !== shown) return;
   document.body.classList.toggle("busy", on);
   stopBtn.classList.toggle("hidden", !on);
   sendBtn.title = on ? "Queue: sent when this reply ends (Enter)" : "Send (Enter)";
-  input.placeholder = on ? "Queue a follow-up… it's sent when this reply ends" : "Ask Bitsmith to build, fix or explain…";
+  setPlaceholder();
   if (!on) renderTodos();
   if (cur.queue.length) renderQueue(); // "Send now" only while idle
+}
+
+// Claude's guess at the next message shows as the placeholder; Tab in the empty box takes it.
+function setPlaceholder() {
+  input.placeholder = S.busy ? "Queue a follow-up… it's sent when this reply ends"
+    : cur.suggestion ? `${cur.suggestion}   ⇥ Tab` : "Ask Bitsmith to build, fix or explain…";
 }
 
 function submit() {
@@ -1169,6 +1183,7 @@ function handle(m) {
     case "tool": return addStep(m);
     case "toolResult": return stepResult(m);
     case "todos": S.todos = m.todos; return renderTodos();
+    case "suggestion": if (cur.busy) return; cur.suggestion = m.text; return cur === shown && setPlaceholder();
     case "changes": cur.changes = m.files; return cur === shown && renderChanges();
     case "permission":
       permissionCard(m);

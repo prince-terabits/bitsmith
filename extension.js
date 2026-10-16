@@ -5,7 +5,7 @@ const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const { EditTracker, diffLines, lines, stats, norm } = require("./edits");
+const { EditTracker, diffLines, lines, stats, norm, isBinary } = require("./edits");
 const { showBrowser } = require("./browser-view");
 
 const PROPOSED = "bitsmith-proposed";
@@ -67,7 +67,7 @@ class Claude {
         "--allowedTools", "mcp__browser__browser_snapshot,mcp__browser__browser_screenshot,mcp__browser__browser_console"); // looking never asks; acting does
     }
     const compactAt = autoCompactAt();
-    const env = { ...process.env };
+    const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1" }; // next-message guesses; without it they stop once plan usage passes 75%
     if (compactAt === "off") env.DISABLE_AUTO_COMPACT = "1";
     else {
       if (/^\d+$/.test(compactAt)) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = compactAt;
@@ -179,7 +179,7 @@ class Chat {
     claude.mode = "default";
     this.claude = claude;
     this.resumeAt = null;
-    claude.request({ subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
+    claude.request({ subtype: "initialize", promptSuggestions: true, hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
     this.syncSettings();
     return claude;
   }
@@ -299,6 +299,8 @@ class Chat {
       for (const b of m.message.content) if (b.type === "tool_result") this.toolResult(b, parent);
     } else if (m.type === "system") {
       this.system(m);
+    } else if (m.type === "prompt_suggestion" && m.suggestion) {
+      this.post({ type: "suggestion", text: m.suggestion });
     } else if (m.type === "rate_limit_event" && m.rate_limit_info) {
       this.p.setUsage(m.rate_limit_info);
     } else if (m.type === "result") {
@@ -414,7 +416,7 @@ class Chat {
   snapshotText(file, text) {
     if (this.p.inFolder(file)) { this.edits.snapshotText(file, text); this.touched.add(norm(file)); }
     const cp = this.checkpoints[this.checkpoints.length - 1];
-    if (cp && !cp.snaps.has(file)) cp.snaps.set(file, text);
+    if (cp && !cp.snaps.has(file) && !Buffer.isBuffer(text)) cp.snaps.set(file, text); // binary: the reply-level git record covers it on Restore
   }
 
   // Before a shell command runs (the CLI waits for this): git-snapshot every repo it may touch,
@@ -441,9 +443,8 @@ class Chat {
       const changed = ((await git(a.root, ["diff", "--name-only", "-z", a.sha])) || "").split("\0").filter(Boolean);
       for (const p of changed) {
         const before = await git(a.root, ["show", `${a.sha}:${p}`], true); // null: not in the snapshot, so the command created it
-        if (before && before.includes(0)) continue; // binary: the reply-level git record still covers it on Restore
         touched.push(path.join(a.root, p));
-        this.snapshotText(touched[touched.length - 1], before == null ? null : before.toString("utf8"));
+        this.snapshotText(touched[touched.length - 1], before == null ? null : isBinary(before) ? before : before.toString("utf8"));
       }
       for (const p of b.untracked) if (!a.untracked.has(p)) { touched.push(path.join(a.root, p)); this.snapshotText(touched[touched.length - 1], null); }
     }
@@ -1037,6 +1038,18 @@ class ChatProvider {
     return path.isAbsolute(file) ? file : path.join(this.folder || "", file);
   }
 
+  // A file outside the workspace (screenshots in /tmp, say): look next to the paths this chat's tools used.
+  mentionedPath(c, rel) {
+    const text = [...(c?.tools.values() || [])].map((t) => JSON.stringify(t.input || {})).join("\n");
+    for (const p of new Set(text.match(/~?\/[^\s'"`\\,;()]+/g) || [])) {
+      const abs = path.resolve(p.replace(/^~/, os.homedir()));
+      const near = [path.join(abs, rel), path.join(path.dirname(abs), rel)]; // abs is a folder, or a file beside it
+      if (abs.endsWith("/" + rel)) near.unshift(abs);
+      for (const f of near) if (fs.existsSync(f) && fs.statSync(f).isFile()) return f;
+    }
+    return null;
+  }
+
   // A file named in a reply. Replies often give a path relative to where Claude was working, or just a name,
   // so when it isn't at the folder root, look for it: files this chat touched first, then shortest path.
   async openPath(c, file, line) {
@@ -1045,7 +1058,10 @@ class ChatProvider {
     if (fs.existsSync(direct)) return openFile(direct, line);
     const rel = file.replace(/^(\.{1,2}\/)+/, "");
     const found = (await vscode.workspace.findFiles(`**/${rel}`, EXCLUDE, 50)).map((u) => u.fsPath);
-    if (!found.length) return vscode.window.showInformationMessage(`Bitsmith couldn't find ${file} in this workspace.`);
+    if (!found.length) {
+      const near = this.mentionedPath(c, rel);
+      return near ? openFile(near, line) : vscode.window.showInformationMessage(`Bitsmith couldn't find ${file} in this workspace.`);
+    }
     const touched = new Set([...(c?.tools.values() || [])].map((t) => t.input?.file_path).filter(Boolean));
     found.sort((a, b) => touched.has(b) - touched.has(a) || a.length - b.length);
     if (found.length === 1 || touched.has(found[0])) return openFile(found[0], line);
@@ -1834,7 +1850,7 @@ function openFile(file, line) {
   if (fs.statSync(file).isDirectory()) return vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(file));
   const opts = { preview: true };
   if (line) opts.selection = new vscode.Range(line - 1, 0, line - 1, 0);
-  vscode.window.showTextDocument(vscode.Uri.file(file), opts);
+  vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file), opts); // not showTextDocument: it refuses images and other binaries
 }
 
 function html(webview, root, chat, tab = false) {

@@ -2,6 +2,7 @@
 // file keeps its pre-edit snapshot until you Keep or Undo it (per file or per hunk).
 const vscode = require("vscode");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const ORIGINAL = "bitsmith-original";
@@ -37,6 +38,11 @@ function diffLines(a, b) {
 
 const lines = (text) => (text === "" ? [] : text.split("\n"));
 
+// Binary the way git decides it: a NUL byte in the first 8 KB. Such files (images, say) have no lines,
+// so they're snapshotted as bytes, reviewed by size and opened in their own viewer.
+const isBinary = (buf) => buf.subarray(0, 8000).includes(0);
+const readSnapshot = (buf) => (isBinary(buf) ? buf : buf.toString("utf8"));
+
 function stats(hunks) {
   let added = 0, removed = 0;
   for (const h of hunks) { added += h.nEnd - h.nStart; removed += h.oEnd - h.oStart; }
@@ -45,7 +51,7 @@ function stats(hunks) {
 
 class EditTracker {
   constructor(onChange) {
-    this.snapshots = new Map(); // abs path -> original text, or null if the agent created the file
+    this.snapshots = new Map(); // abs path -> original text (a Buffer if binary), or null if the agent created the file
     this.onChange = onChange; // (files) => void, for the chat's "N files changed" bar
     this.lensEmitter = new vscode.EventEmitter();
     this.added = vscode.window.createTextEditorDecorationType({
@@ -95,13 +101,24 @@ class EditTracker {
   snapshot(file) {
     file = norm(file);
     if (this.snapshots.has(file)) return;
-    try { this.snapshots.set(file, fs.readFileSync(file, "utf8")); } catch { this.snapshots.set(file, null); }
+    try { this.snapshots.set(file, readSnapshot(fs.readFileSync(file))); } catch { this.snapshots.set(file, null); }
   }
 
   // Same, when the pre-change text is already known (a shell command's file, from a git snapshot taken before it ran).
   snapshotText(file, text) {
     file = norm(file);
-    if (!this.snapshots.has(file)) this.snapshots.set(file, text);
+    if (!this.snapshots.has(file)) this.snapshots.set(file, Buffer.isBuffer(text) ? readSnapshot(text) : text);
+  }
+
+  bytes(file) {
+    try { return fs.readFileSync(file); } catch { return null; }
+  }
+
+  // Bytes before and after, if either side is binary; null for a text file.
+  binary(file) {
+    const before = this.snapshots.get(file), after = this.bytes(file);
+    if (!Buffer.isBuffer(before) && !(after && isBinary(after))) return null;
+    return { before: before == null ? null : Buffer.from(before), after };
   }
 
   current(file) {
@@ -118,6 +135,12 @@ class EditTracker {
   files() {
     const out = [];
     for (const file of this.snapshots.keys()) {
+      const bin = this.binary(file);
+      if (bin) {
+        if (bin.before && bin.after?.equals(bin.before)) { this.snapshots.delete(file); continue; }
+        out.push({ file, added: 0, removed: 0, binary: true, before: bin.before?.length ?? null, after: bin.after?.length ?? null, created: !bin.before, deleted: !bin.after });
+        continue;
+      }
       const h = this.hunks(file);
       if (!h.length && this.current(file) !== null) { this.snapshots.delete(file); continue; } // nothing left to review
       out.push({ file, ...stats(h), created: this.snapshots.get(file) === null, deleted: this.current(file) === null });
@@ -126,7 +149,8 @@ class EditTracker {
   }
 
   statsFor(file) {
-    return this.snapshots.has(file) ? stats(this.hunks(file)) : null;
+    if (!this.snapshots.has(file)) return null;
+    return this.binary(file) ? { added: 0, removed: 0 } : stats(this.hunks(file));
   }
 
   refresh() {
@@ -141,7 +165,7 @@ class EditTracker {
   decorate() {
     for (const editor of vscode.window.visibleTextEditors) {
       const file = editor.document.uri.fsPath;
-      if (!this.snapshots.has(file)) { for (const d of [this.added, this.removed, this.was]) editor.setDecorations(d, []); continue; }
+      if (!this.snapshots.has(file) || this.binary(file)) { for (const d of [this.added, this.removed, this.was]) editor.setDecorations(d, []); continue; }
       const add = [], del = [], was = [];
       const last = editor.document.lineCount - 1;
       const old = lines(this.snapshots.get(file) ?? "");
@@ -163,7 +187,7 @@ class EditTracker {
 
   lenses(doc) {
     const file = doc.uri.fsPath;
-    if (!this.snapshots.has(file)) return [];
+    if (!this.snapshots.has(file) || this.binary(file)) return [];
     const hunks = this.hunks(file);
     const top = new vscode.Range(0, 0, 0, 0);
     const out = [
@@ -197,7 +221,7 @@ class EditTracker {
         try { fs.unlinkSync(f); } catch {}
         continue;
       }
-      if (doc) {
+      if (doc && !Buffer.isBuffer(original)) {
         await this.replaceText(doc, original);
       } else {
         fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -227,6 +251,7 @@ class EditTracker {
   async syncFromDisk(file) {
     if (!file) return;
     file = norm(file);
+    if (this.binary(file)) return;
     const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === file);
     if (!doc) return;
     let disk;
@@ -247,9 +272,17 @@ class EditTracker {
   }
 
   showDiff(file) {
+    const bin = this.binary(file);
+    if (bin) { // VS Code's image viewer diffs two files, so the old bytes go to a temp copy with the same name
+      if (!bin.before || !bin.after) return bin.after && vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
+      const old = path.join(os.tmpdir(), `bitsmith-original-${process.pid}`, require("crypto").createHash("md5").update(file).digest("hex").slice(0, 8), path.basename(file));
+      fs.mkdirSync(path.dirname(old), { recursive: true });
+      fs.writeFileSync(old, bin.before);
+      return vscode.commands.executeCommand("vscode.diff", vscode.Uri.file(old), vscode.Uri.file(file), `${path.basename(file)} (Bitsmith changes)`);
+    }
     const left = vscode.Uri.from({ scheme: ORIGINAL, path: vscode.Uri.file(file).path });
     vscode.commands.executeCommand("vscode.diff", left, vscode.Uri.file(file), `${path.basename(file)} (Bitsmith changes)`);
   }
 }
 
-module.exports = { EditTracker, diffLines, lines, stats, norm };
+module.exports = { EditTracker, diffLines, lines, stats, norm, isBinary };

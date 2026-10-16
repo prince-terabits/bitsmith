@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.11.2
+
+- **Fix: clicking an image named in a reply did nothing.** Files now open with VS Code's own opener, so images show
+  in the image preview (and other binaries in their viewer) instead of failing as text.
+- **Files outside the workspace open too.** When a reply names just `board.png` and it isn't in the workspace (say,
+  a screenshot saved in /tmp), Bitsmith looks next to the paths this chat's tools used.
+
+## 1.11.1
+
+- **Images and other binary files in "files changed" show their size, not fake line counts.** A PNG used to show
+  as "+689 -0" because its bytes were split on newlines. Now it reads "new · 142 KB", "96 KB → 118 KB" or
+  "deleted · 2 KB", the header counts them apart ("· 3 binary"), and the diff button opens VS Code's side-by-side
+  image diff. No line highlights or CodeLens on them.
+- **Fix: Undo could corrupt a changed binary file.** Its snapshot was kept as text; it's now kept as bytes, so
+  Undo puts back the exact original. Binary files a command changes are now in the list too (they used to be left out).
+
+## 1.11.0
+
+- **Suggested next message**, like the Claude Code terminal. After a reply, Claude's guess at what you'll ask next
+  shows greyed out as the input's placeholder; press **Tab** in the empty box to take it, then edit or send. Each chat
+  keeps its own, and it goes away when a new reply starts. It appears from the second reply on, and not in plan mode.
+
 ## 1.10.3
 
 - **Middle-click closes a chat tab**, like editor tabs (same as its × button).

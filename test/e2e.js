@@ -221,15 +221,25 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
     const realFind = vscode.workspace.findFiles, opened = [], picks = [];
     vscode.workspace.findFiles = async (glob) => walk(cwd).filter((f) => f.endsWith("/" + glob.slice(3))).map((f) => vscode.Uri.file(f));
-    vscode.window.showTextDocument = async (u) => opened.push(u.fsPath);
+    const openedFrom = commands.length; // files open with vscode.open, so images get the image viewer
     vscode.window.showQuickPick = async (items) => { picks.push(items.map((i) => i.description)); return items[0]; };
     await provider.openPath(c, "notes.md");
     await provider.openPath(c, "deep/notes.md");
     await provider.openPath(c, "package.json"); // two match: ask, shortest first
     c.tools.set("t1", { name: "Edit", input: { file_path: path.join(cwd, "y/z/package.json") } });
     await provider.openPath(c, "package.json"); // the one this chat edited wins
+    opened.push(...commands.slice(openedFrom).filter((a) => a[0] === "vscode.open").map((a) => a[1].fsPath));
     assert.deepStrictEqual(opened.map((f) => path.relative(cwd, f)), ["docs/deep/notes.md", "docs/deep/notes.md", "x/package.json", "y/z/package.json"]);
     assert.deepStrictEqual(picks, [["x/package.json", "y/z/package.json"]]);
+    // outside the workspace (a screenshot in /tmp): found next to a path this chat's tools used
+    const shots = fs.mkdtempSync(path.join(require("os").tmpdir(), "bitsmith-shots-"));
+    fs.writeFileSync(path.join(shots, "board.png"), Buffer.from([0x89, 0x50, 0, 0]));
+    c.tools.set("t2", { name: "Bash", input: { command: `node shoot.js --out ${shots}/home.png` } });
+    const fromShots = commands.length;
+    await provider.openPath(c, "board.png");
+    assert.deepStrictEqual(commands.slice(fromShots).filter((a) => a[0] === "vscode.open").map((a) => a[1].fsPath), [path.join(shots, "board.png")]);
+    c.tools.delete("t2");
+    fs.rmSync(shots, { recursive: true });
     vscode.workspace.findFiles = realFind;
     c.tools.delete("t1");
     for (const d of ["docs", "x", "y"]) fs.rmSync(path.join(cwd, d), { recursive: true });
@@ -383,6 +393,26 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     for (const c of [a, b]) { provider.chats.delete(c.key); c.shutdown(); }
     console.log("per-chat changes ok");
   }
+
+  // Binary files (images): reviewed by size, not counted as lines, and Undo puts the exact bytes back
+  {
+    const c = provider.createChat();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 10, 10, 10, 0xff, 0xfe]);
+    fs.writeFileSync("old.png", png);
+    c.snapshot(path.join(cwd, "old.png")); fs.writeFileSync("old.png", Buffer.concat([png, png]));
+    c.snapshot(path.join(cwd, "new.png")); fs.writeFileSync("new.png", png);
+    const st = posts.length;
+    provider.edits.refresh();
+    await waitFor((m) => m.type === "changes" && m.chat === c.key, st, 3000);
+    const files = Object.fromEntries(posts.filter((m) => m.type === "changes" && m.chat === c.key).pop().files.map((f) => [f.rel, f]));
+    assert.deepStrictEqual([files["old.png"].binary, files["old.png"].before, files["old.png"].after, files["old.png"].added], [true, 17, 34, 0]);
+    assert(files["new.png"].binary && files["new.png"].created && files["new.png"].after === 17, "new image shows as created");
+    await provider.onWebview({ type: "undo", chat: c.key });
+    assert(fs.readFileSync("old.png").equals(png), "Undo restores the image's exact bytes");
+    assert(!fs.existsSync("new.png"), "Undo removes the created image");
+    provider.chats.delete(c.key); c.shutdown();
+    console.log("binary changes ok");
+  }
   if (process.argv.includes("--live-usage")) {
     provider.onWebview({ type: "ready" });
     provider.setSetting("model", "haiku");
@@ -392,6 +422,21 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const live = posts.slice(st).filter((m) => m.type === "usage").pop();
     assert(live && typeof live.usage.session.used === "number", "real CLI usage arrives");
     console.log(`live usage ok: session ${Math.round(live.usage.session.used * 100)}%, weekly ${Math.round(live.usage.weekly.used * 100)}%, plan ${live.plan}`);
+    provider.shutdown();
+    process.exit(0);
+  }
+  // next-message suggestion: the CLI only guesses from the second reply on
+  if (process.argv.includes("--live-suggest")) {
+    provider.onWebview({ type: "ready" });
+    provider.setSetting("model", "haiku");
+    for (const text of ["I am building a todo app in python. Write add_todo(items, text). Just code, no tools.", "Now write remove_todo(items, index). Just code, no tools."]) {
+      const st = posts.length;
+      provider.onWebview({ type: "send", text, context: [] });
+      await waitFor((m) => m.type === "done", st);
+    }
+    const s = await waitFor((m) => m.type === "suggestion", 0, 60000);
+    assert(s.text.trim(), "a suggestion arrives after the second reply");
+    console.log("live suggestion ok:", s.text);
     provider.shutdown();
     process.exit(0);
   }
