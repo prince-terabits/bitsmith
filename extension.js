@@ -138,7 +138,6 @@ class Chat {
     this.redoStack = []; // what each restore undid, newest last, until the next message is sent
     this.allowEdits = false; // "Allow all edits in this chat" on an edit card
     this.queue = []; // messages typed ahead in the panel, kept so a reload doesn't lose them
-    this.turnMark = null; // git state when the current reply started (promise), to find shell-made changes
     this.tasks = []; // background tasks still running: { id, type, description, start, toolUseId, progress }
     this.background = new Set(); // ids of tasks started in the background (others are a sub-agent's own foreground work)
     this.known = new Map(); // task id -> { type, description }, kept after the task ends for its notification
@@ -178,7 +177,6 @@ class Chat {
     claude.model = s.model;
     claude.mode = "default";
     this.claude = claude;
-    this.resumeAt = null;
     claude.request({ subtype: "initialize", promptSuggestions: true, hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
     this.syncSettings();
     return claude;
@@ -216,6 +214,7 @@ class Chat {
   reset() {
     this.shutdown();
     this.sessionId = null;
+    this.resumeAt = null;
     this.busy = false;
     this.checkpoints = [];
     this.redoStack = [];
@@ -242,8 +241,6 @@ class Chat {
   finish(extra = {}) {
     this.busy = false;
     this.saveCheckpoints();
-    if (this.turnMark) this.recordShell(this.turnMark, this.p.gitMark(), this.checkpoints[this.checkpoints.length - 1]);
-    this.turnMark = null;
     for (const file of this.edits.snapshots.keys()) this.edits.syncFromDisk(file);
     this.post({ type: "done", ms: Date.now() - this.started, ...extra });
     this.edits.refresh();
@@ -263,7 +260,6 @@ class Chat {
     this.syncSettings();
     this.started = Date.now();
     this.redoStack = [];
-    this.turnMark = this.p.gitMark();
     if (checkpoint != null) this.checkpoints.push({ id: checkpoint, key: `${this.lastUuid || "start"}#${this.userCount}`, sessionId: this.sessionId, resumeAt: this.lastUuid, snaps: new Map() });
     this.userCount++;
     const content = images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } }));
@@ -275,14 +271,13 @@ class Chat {
   beginAuto() {
     this.busy = true;
     this.started = Date.now();
-    this.turnMark = this.p.gitMark();
     this.post({ type: "autoTurn" });
   }
 
   // ---- CLI messages ----
 
   handle(m) {
-    if (m.session_id && m.type === "system" && m.subtype === "init") this.sessionId = m.session_id;
+    if (m.session_id && m.type === "system" && m.subtype === "init") { this.sessionId = m.session_id; this.resumeAt = null; } // a rewind is kept until the CLI has branched, so a restart before that still rewinds
     const parent = m.parent_tool_use_id || null; // set on a sub-agent's own messages
     if (!this.busy && !parent && (m.type === "stream_event" || m.type === "assistant")) this.beginAuto();
     if (m.type === "stream_event" && !parent) {
@@ -416,7 +411,7 @@ class Chat {
   snapshotText(file, text) {
     if (this.p.inFolder(file)) { this.edits.snapshotText(file, text); this.touched.add(norm(file)); }
     const cp = this.checkpoints[this.checkpoints.length - 1];
-    if (cp && !cp.snaps.has(file) && !Buffer.isBuffer(text)) cp.snaps.set(file, text); // binary: the reply-level git record covers it on Restore
+    if (cp && !cp.snaps.has(file) && !Buffer.isBuffer(text)) cp.snaps.set(file, text); // binary: the command's git record covers it on Restore
   }
 
   // Before a shell command runs (the CLI waits for this): git-snapshot every repo it may touch,
@@ -437,16 +432,21 @@ class Chat {
   // After the command: what changed since its snapshots becomes reviewable and restorable.
   async captureShell(marks) {
     const touched = [];
+    const cp = this.checkpoints[this.checkpoints.length - 1];
     for (const a of marks) {
       const b = await this.p.gitMark(a.root);
       if (!b) continue;
-      const changed = ((await git(a.root, ["diff", "--name-only", "-z", a.sha])) || "").split("\0").filter(Boolean);
+      // A file untracked before the command (say it ran `git add`) isn't in the snapshot: its old content is unknown,
+      // and reading it as "created" would delete it on Undo or Restore, so it's left alone.
+      const changed = ((await git(a.root, ["diff", "--name-only", "-z", a.sha])) || "").split("\0").filter((p) => p && !a.untracked.has(p));
+      const created = [...b.untracked].filter((p) => !a.untracked.has(p));
+      if (cp && (changed.length || created.length)) (cp.shell ||= []).push({ root: a.root, a: a.sha, changed, created }); // for Restore, binary files included
       for (const p of changed) {
         const before = await git(a.root, ["show", `${a.sha}:${p}`], true); // null: not in the snapshot, so the command created it
         touched.push(path.join(a.root, p));
         this.snapshotText(touched[touched.length - 1], before == null ? null : isBinary(before) ? before : before.toString("utf8"));
       }
-      for (const p of b.untracked) if (!a.untracked.has(p)) { touched.push(path.join(a.root, p)); this.snapshotText(touched[touched.length - 1], null); }
+      for (const p of created) { touched.push(path.join(a.root, p)); this.snapshotText(touched[touched.length - 1], null); }
     }
     if (!touched.length) return;
     for (const f of touched) await this.edits.syncFromDisk(f);
@@ -455,18 +455,6 @@ class Chat {
   }
 
   // ---- checkpoints ----
-
-  // What commands changed during a reply: tracked files that differ between the git states before and after it,
-  // and untracked files that appeared. Edits made with the Edit/Write tools are covered by snapshots instead.
-  async recordShell(startMark, endMark, cp) {
-    const a = await startMark, b = await endMark;
-    if (!a || !b || !cp) return;
-    const changed = a.sha === b.sha ? [] : ((await git(b.root, ["diff", "--name-only", "-z", a.sha, b.sha])) || "").split("\0").filter(Boolean);
-    const created = [...b.untracked].filter((p) => !a.untracked.has(p));
-    if (!changed.length && !created.length) return;
-    (cp.shell ||= []).push({ root: b.root, a: a.sha, changed, created });
-    this.saveCheckpoints();
-  }
 
   // File contents to put back for the shell changes of these checkpoints: each path as it was before the first reply that touched it.
   async shellTargets(later) {
@@ -516,7 +504,7 @@ class Chat {
     if (this.busy) return this.post({ type: "editCancelled", checkpoint: id }); // Claude started replying meanwhile
     const after = new Map(); // bytes, so binary files survive a redo
     for (const f of files.keys()) { try { after.set(f, fs.readFileSync(f)); } catch { after.set(f, null); } }
-    this.redoStack.push({ files: after, checkpoints: this.checkpoints.slice(idx), sessionId: this.sessionId, lastUuid: this.lastUuid });
+    this.redoStack.push({ files: after, checkpoints: this.checkpoints.slice(idx), sessionId: this.sessionId, resumeAt: this.resumeAt, lastUuid: this.lastUuid });
     await this.writeFiles(files);
     const cp = this.checkpoints[idx];
     this.checkpoints.splice(idx);
@@ -538,7 +526,7 @@ class Chat {
     this.checkpoints.push(...r.checkpoints);
     this.restart();
     this.sessionId = r.sessionId;
-    this.resumeAt = null;
+    this.resumeAt = r.resumeAt;
     this.lastUuid = r.lastUuid;
     this.edits.refresh();
     this.saveCheckpoints();
@@ -675,6 +663,8 @@ class Chat {
   loadSession(id) {
     this.shutdown();
     this.sessionId = id;
+    this.resumeAt = null;
+    this.allowEdits = false; // "Allow all edits" was for the conversation that was here
     this.busy = false;
     this.checkpoints = [];
     this.redoStack = [];
@@ -1009,11 +999,10 @@ class ChatProvider {
       case "permission": return c.answer(m);
       case "editPlan": return c.editPlan(m.id);
       case "showProposed": return c.showProposed(m.id);
-      case "setting": return this.setSetting(m.key, m.value);
+      case "setting": return this.setSetting(m.key, m.value, c);
       case "pickContext": return this.pickContext(c);
-      case "dragdbg": return fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} [${m.chat}] ${m.line}\n`); // TEMP drag debug
-      case "drop": fs.appendFileSync("/tmp/bitsmith-drag.log", `${new Date().toISOString()} host got drop: ${JSON.stringify(m.uris)}\n`); return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)), c);
-      case "pastePaths": return this.pastePaths(m.paths, c);
+      case "drop": return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)), c);
+      case "pastePaths": return this.pastePaths(m.paths, c, m.raw);
       case "keep": return this.edits.keep(m.file || [...c.touched]); // no file: everything this chat changed
       case "undo": return this.edits.undo(m.file || [...c.touched]);
       case "diffFile": return this.edits.showDiff(m.file);
@@ -1085,9 +1074,9 @@ class ChatProvider {
     for (const c of this.chats.values()) c.shutdown();
   }
 
-  setSetting(key, value) {
+  setSetting(key, value, c = this.active) {
     this.state.update(key, value);
-    if (key === "model" || key === "mode") this.active.syncSettings();
+    if (key === "model" || key === "mode") c.syncSettings(); // the chat it was changed in (an editor tab's isn't the sidebar's)
   }
 
   // ---- open chats ----
@@ -1298,7 +1287,7 @@ class ChatProvider {
   }
 
   // Pasted text that looked like paths: existing ones become chips, the rest goes back into the input as typed.
-  pastePaths(paths, c) {
+  pastePaths(paths, c, raw = paths.join("\n")) {
     const items = [], rest = [];
     for (const p of paths) {
       const file = p.startsWith("file://") ? vscode.Uri.parse(p).fsPath : this.abs(p.replace(/^~(?=\/|$)/, os.homedir()));
@@ -1306,8 +1295,9 @@ class ChatProvider {
         items.push({ kind: fs.statSync(file).isDirectory() ? "folder" : "file", file, rel: this.rel(file) });
       } catch { rest.push(p); }
     }
-    this.addItems(items, c);
-    if (rest.length) (c?.panel ? c.panel.webview : this.view?.webview)?.postMessage({ type: "insertText", text: rest.join("\n") });
+    // all real paths: chips; otherwise it was just text that looked like paths ("// comment", "/api/v1"), pasted as is
+    if (!rest.length) return this.addItems(items, c);
+    (c?.panel ? c.panel.webview : this.view?.webview)?.postMessage({ type: "insertText", text: raw });
   }
 
   addSelection() {

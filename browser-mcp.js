@@ -11,7 +11,7 @@ const path = require("path");
 const readline = require("readline");
 
 const headless = process.env.BITSMITH_BROWSER === "headless";
-let chrome = null, profile = null, temp = false, ws = null, seq = 0, loaded = null;
+let chrome = null, port = null, profile = null, temp = false, ws = null, seq = 0, loaded = null;
 const waiting = new Map(), logs = [];
 
 function findChrome() {
@@ -47,7 +47,7 @@ const dropProfile = () => { if (temp) try { fs.rmSync(profile, { recursive: true
 const writeState = (data) => { if (process.env.BITSMITH_STATE) try { data ? fs.writeFileSync(process.env.BITSMITH_STATE, JSON.stringify(data)) : fs.rmSync(process.env.BITSMITH_STATE, { force: true }); } catch {} };
 
 // The kept profile when asked for and free; otherwise (another chat has it open) a throwaway one, deleted at the end.
-async function launch() {
+async function start() {
   const keep = process.env.BITSMITH_PROFILE;
   temp = !keep || inUse(keep);
   if (temp) profile = fs.mkdtempSync(path.join(os.tmpdir(), "bitsmith-browser-"));
@@ -55,7 +55,7 @@ async function launch() {
   const args = ["--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble",
     "--window-size=1280,800", ...(headless ? ["--headless=new"] : process.env.DISPLAY ? ["--ozone-platform=x11"] : []), "about:blank"];
   chrome = spawn(findChrome(), args, { stdio: ["ignore", "ignore", "pipe"], env: hostEnv() });
-  const port = await new Promise((resolve, reject) => {
+  port = await new Promise((resolve, reject) => {
     let err = "";
     const fail = (why) => { clearTimeout(timer); try { chrome.kill(); } catch {} dropProfile(); reject(new Error(`Chrome did not start (${why}): ${err.trim().split("\n").slice(-6).join("\n")}`)); };
     const timer = setTimeout(() => fail("no answer in 20 s"), 20000);
@@ -67,11 +67,24 @@ async function launch() {
       if (m) { clearTimeout(timer); resolve(m[1]); }
     });
   });
-  chrome.on("exit", () => { chrome = null; ws = null; writeState(null); }); // closed by hand: the next call starts a new one
-  const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page");
-  ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error("Could not connect to Chrome")); });
-  ws.onclose = () => { ws = null; };
+  chrome.on("exit", () => { chrome = null; writeState(null); ws?.close(); }); // closed by hand: the next call starts a new one
+}
+
+// Attach to a page of our Chrome, starting it if needed. If only the tab was closed, Chrome is still running
+// (and holds the profile), so open a new tab in it rather than starting a second one.
+async function launch() {
+  if (!chrome) await start();
+  const at = `http://127.0.0.1:${port}/json`;
+  const page = (await (await fetch(`${at}/list`)).json()).find((t) => t.type === "page") || (await (await fetch(`${at}/new?about:blank`, { method: "PUT" })).json());
+  const sock = (ws = new WebSocket(page.webSocketDebuggerUrl));
+  await new Promise((resolve, reject) => { sock.onopen = resolve; sock.onerror = () => reject(new Error("Could not connect to Chrome")); });
+  sock.onclose = () => { // tab or Chrome closed: fail whatever was waiting on it
+    if (ws !== sock) return;
+    ws = null; writeState(null);
+    for (const done of waiting.values()) done({ error: { message: "The browser tab was closed" } });
+    waiting.clear();
+    loaded?.(); // and end a wait for a page load
+  };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id) { waiting.get(m.id)?.(m); waiting.delete(m.id); return; }
@@ -110,6 +123,7 @@ const QUIET = `new Promise((done) => { let t = setTimeout(fin, 400); const end =
   o.observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); })`;
 async function settle(navigating) {
   if (navigating) await Promise.race([navigating, new Promise((r) => setTimeout(r, 15000))]);
+  if (!ws) throw new Error("The browser tab was closed");
   for (let i = 0; i < 3; i++) {
     try { await evaluate(`document.readyState === "complete" || new Promise((r) => addEventListener("load", r, { once: true }))`); return await evaluate(QUIET); }
     catch { await new Promise((r) => setTimeout(r, 500)); } // the page navigated mid-check: try the new one

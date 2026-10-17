@@ -319,6 +319,7 @@ function renderMention() {
 
 input.addEventListener("input", () => { autosize(); slashIndex = 0; updateMention(); renderSlash(); });
 input.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // an IME is composing: its Enter/arrows/Tab belong to it
   if (mention?.items.length) {
     const n = mention.items.length;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); mention.index = (mention.index + (e.key === "ArrowDown" ? 1 : -1) + n) % n; return renderMention(); }
@@ -332,7 +333,7 @@ input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { input.value = ""; return renderSlash(); }
   }
   if (e.key === "Tab" && !e.shiftKey && !input.value && cur.suggestion && !S.busy) { e.preventDefault(); input.value = cur.suggestion; return autosize(); }
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
   // shell-style recall: Up on the first line / Down on the last line walks past prompts
   const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
   const down = e.key === "ArrowDown" && !input.value.slice(input.selectionEnd).includes("\n");
@@ -357,29 +358,22 @@ input.addEventListener("keydown", (e) => {
 let histAt = -1, histDraft = "", histList = [];
 input.addEventListener("input", () => { histAt = -1; });
 input.addEventListener("paste", (e) => {
+  const raw = e.clipboardData.getData("text/plain") || "";
   for (const item of e.clipboardData.items) {
-    if (!item.type.startsWith("image/")) continue;
+    if (!item.type.startsWith("image/") || raw.trim()) continue; // with text too (spreadsheet cells come with a picture of themselves), the text wins
     e.preventDefault();
     addImageFile(item.getAsFile());
   }
   // Pasted paths (one per line) become file/folder chips; the extension sends back any that don't exist as text.
-  const lines = (e.clipboardData.getData("text/plain") || "").split(/\r?\n/).map((l) => l.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
+  const lines = raw.split(/\r?\n/).map((l) => l.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
   if (!e.defaultPrevented && lines.length && lines.length <= 50 && lines.every((l) => /^(file:\/\/\S+|~?\/[^\n]+|\.{0,2}[\w.@-]*\/\S*)$/.test(l))) {
     e.preventDefault();
-    send({ type: "pastePaths", paths: lines });
+    send({ type: "pastePaths", paths: lines, raw }); // any line that isn't a real path: raw goes in unchanged
   }
 });
 
 // ---------- drag & drop ----------
 let dragDepth = 0;
-// TEMP drag debug: every drag event this page sees goes to /tmp/bitsmith-drag.log
-let dbgLast = 0;
-for (const t of ["dragenter", "dragover", "dragleave", "drop"]) window.addEventListener(t, (e) => {
-  if (t === "dragover" && Date.now() - dbgLast < 300) return;
-  dbgLast = Date.now();
-  send({ type: "dragdbg", line: `${t} shift=${e.shiftKey} target=${e.target?.tagName}.${String(e.target?.className).slice(0, 40)} types=${[...(e.dataTransfer?.types || [])].join(",")} prevented=${e.defaultPrevented}` });
-}, true);
-send({ type: "dragdbg", line: "chat.js loaded, drag listeners on" });
 window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; box.classList.add("dragging"); });
 window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; box.classList.remove("dragging"); } });
 window.addEventListener("dragover", (e) => e.preventDefault());
@@ -525,7 +519,7 @@ function addText(text) {
   const t = ensureTurn();
   endThinking(t);
   if (t.workingLabel && t.workingLabel !== "Working…") working(true); // the text itself shows progress now
-  if (!t.text) { t.text = h("div", { class: "md" }); t.text.raw = ""; t.body.append(t.text); }
+  if (!t.text) { t.text = h("div", { class: "md" }); t.text.raw = ""; t.working ? t.working.before(t.text) : t.body.append(t.text); } // above the spinner now: the render below may run with another chat shown
   t.text.raw += text;
   dirty.add(t.text);
   if (!renderQueued) {
@@ -1096,6 +1090,9 @@ function showChat(key, tell) {
   histAt = -1; // recall restarts from the newly shown chat
   const c = chats.get(key) || makeChat(key);
   swapDraft(shown && chats.has(shown.key) ? shown : null, c);
+  mention = null; // the @ menu belonged to the chat being left
+  slashIndex = 0;
+  renderSlash();
   enter(c);
   shown = c;
   const caughtUp = c.busy || c.unread; // it kept going while hidden: show the latest

@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.11.6
+
+Medium bug fixes:
+- **Switching chats with the @ or / menu open no longer sends the pick to the other chat.**
+- **Opening a past chat turns "Allow all edits" off**, so its edits ask again.
+- **Mode and model changes in an editor-tab chat apply to that chat**, not the sidebar one.
+- **Pasted text stays as typed.** It only becomes file chips when every line is a path that exists; text that
+  only looks like paths (`// comments`, `'/api/v1'`) is no longer trimmed or stripped.
+- **Pasting spreadsheet cells keeps the text** instead of only the image the clipboard also holds.
+- **IME composition:** Enter that confirms composed text no longer picks a menu item or sends.
+- **A chat replying in the background keeps its "Working…" spinner below the reply text.**
+- **Tools panel:** env/header lines without `=`/`:` are rejected instead of getting a wrong key; editing an MCP
+  server keeps extra fields (`oauth`, `headersHelper`, …); "Permissions file" creates `settings.local.json` if
+  needed; the permission hint now says deny beats ask beats allow.
+- **Browser:** tool calls fail with "The browser tab was closed" instead of hanging when the tab or Chrome closes;
+  closing the tab reuses the running Chrome (a new tab) instead of starting a second one that could lose its
+  profile; the live view reconnects after the browser restarts.
+
+## 1.11.5
+
+Serious bug fixes:
+- **Restore and Undo no longer delete files a command `git add`ed.** A file that was untracked before the command
+  wasn't in the git snapshot, so it read as "created by the command" and got deleted. It's now left alone.
+- **Your own edits during a reply are no longer reverted by Restore.** Command changes are recorded per command
+  (just before and after it ran), not across the whole reply, so files you save or create meanwhile aren't touched.
+- **A restore sticks even if the CLI restarts before your next message** (switching chats, changing a setting,
+  Open in editor, a crash). Before, Claude resumed the full conversation, including the removed messages.
+- **Redo after two restores in a row resumes the right point.**
+- **Undo all on a file with unsaved edits asks first** instead of silently discarding them.
+- **Clicking Keep/Undo on two hunks quickly no longer corrupts the file.** The second click used line numbers from
+  before the first; each lens now finds its hunk by content.
+- **Removed the temporary drag-and-drop debug log** (`/tmp/bitsmith-drag.log`).
+
 ## 1.11.4
 
 - **Fix: the same chat showed many times in history.** Retry, Restore and Edit continue a chat in a copy of its

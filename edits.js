@@ -198,8 +198,8 @@ class EditTracker {
     for (const h of hunks) {
       const at = new vscode.Range(Math.min(h.nStart, doc.lineCount - 1), 0, Math.min(h.nStart, doc.lineCount - 1), 0);
       out.push(
-        new vscode.CodeLens(at, { title: "$(check) Keep", command: "bitsmith.keepHunk", arguments: [file, h] }),
-        new vscode.CodeLens(at, { title: "$(discard) Undo", command: "bitsmith.undoHunk", arguments: [file, h] }),
+        new vscode.CodeLens(at, { title: "$(check) Keep", command: "bitsmith.keepHunk", arguments: [file, { ...h, key: this.hunkKey(file, h) }] }),
+        new vscode.CodeLens(at, { title: "$(discard) Undo", command: "bitsmith.undoHunk", arguments: [file, { ...h, key: this.hunkKey(file, h) }] }),
       );
     }
     return out;
@@ -214,9 +214,10 @@ class EditTracker {
   async undo(file) {
     for (const f of Array.isArray(file) ? file : file ? [file] : [...this.snapshots.keys()]) {
       if (!this.snapshots.has(f)) continue;
+      const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === f);
+      if (doc?.isDirty && !(await vscode.window.showWarningMessage(`${path.basename(f)} has unsaved changes. Undo puts it back to how it was before Bitsmith changed it, so they'd be lost too.`, { modal: true }, "Undo anyway"))) continue;
       const original = this.snapshots.get(f);
       this.snapshots.delete(f);
-      const doc = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === f);
       if (original === null) {
         try { fs.unlinkSync(f); } catch {}
         continue;
@@ -231,14 +232,30 @@ class EditTracker {
     this.refresh();
   }
 
+  hunkKey(file, h) {
+    return JSON.stringify([lines(this.snapshots.get(file) ?? "").slice(h.oStart, h.oEnd), lines(this.current(file) ?? "").slice(h.nStart, h.nEnd)]);
+  }
+
+  // A lens's hunk as it is now: an earlier Keep/Undo (lenses refresh a moment later) or typing shifts the line numbers,
+  // so look it up by its text, nearest first. Gone: null, and the click does nothing.
+  liveHunk(file, h) {
+    if (!h?.key) return h;
+    const same = this.hunks(file).filter((x) => this.hunkKey(file, x) === h.key);
+    return same.sort((a, b) => Math.abs(a.nStart - h.nStart) - Math.abs(b.nStart - h.nStart))[0] || null;
+  }
+
   // Accept one hunk: fold it into the snapshot so it stops showing as a change.
   keepHunk(file, h) {
+    h = this.liveHunk(file, h);
+    if (!h) return this.refresh();
     const before = lines(this.snapshots.get(file) ?? ""), after = lines(this.current(file) ?? "");
     this.snapshots.set(file, [...before.slice(0, h.oStart), ...after.slice(h.nStart, h.nEnd), ...before.slice(h.oEnd)].join("\n"));
     this.refresh();
   }
 
   async undoHunk(file, h) {
+    h = this.liveHunk(file, h);
+    if (!h) return this.refresh();
     const before = lines(this.snapshots.get(file) ?? "");
     const doc = await vscode.workspace.openTextDocument(file);
     const after = lines(doc.getText());

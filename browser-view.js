@@ -7,7 +7,8 @@ const views = new Map(); // state file -> panel
 
 function showBrowser(state) {
   const open = views.get(state);
-  if (open) return open.reveal(undefined, true);
+  if (open && !open.dead) return open.reveal(undefined, true);
+  open?.dispose(); // its browser closed; attach a fresh view to the current page
   let info;
   try { info = JSON.parse(fs.readFileSync(state, "utf8")); } catch { return vscode.window.showInformationMessage("Claude hasn't opened the browser in this chat yet."); }
   const panel = vscode.window.createWebviewPanel("bitsmith.browser", "Claude's Browser", { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
@@ -31,14 +32,14 @@ function showBrowser(state) {
     else if (m.id === history && m.result) post({ url: m.result.entries[m.result.currentIndex]?.url });
   };
   ws.onerror = () => {};
-  ws.onclose = () => panel.webview.postMessage({ closed: true });
+  ws.onclose = () => { panel.dead = true; panel.webview.postMessage({ closed: true }); };
   panel.webview.onDidReceiveMessage((m) => {
     if (m.mouse) send("Input.dispatchMouseEvent", m.mouse);
     else if (m.key) send("Input.dispatchKeyEvent", m.key);
     else if (m.nav === "back") send("Runtime.evaluate", { expression: "history.back()" });
     else if (m.nav === "reload") send("Page.reload");
   });
-  panel.onDidDispose(() => { views.delete(state); try { ws.close(); } catch {} });
+  panel.onDidDispose(() => { if (views.get(state) === panel) views.delete(state); try { ws.close(); } catch {} });
   panel.webview.html = page();
 }
 

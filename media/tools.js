@@ -103,7 +103,7 @@ function hint(s) {
 function toolsList(s, tools) {
   const all = s.rule;
   return h("div", { class: "tools" },
-    h("div", { class: "tool all" }, h("div", { class: "grow" }, h("b", {}, "All tools of this server"), h("div", { class: "muted small" }, "A rule for one tool below beats this one.")),
+    h("div", { class: "tool all" }, h("div", { class: "grow" }, h("b", {}, "All tools of this server"), h("div", { class: "muted small" }, "Rules add up: deny wins over ask, and ask over allow, whether it's set here or on one tool.")),
       select(ruleFor(all), RULE_CHOICES, (v) => send({ type: "setRule", rule: all, value: v }), "Permission for all tools")),
     !tools.length && h("div", { class: "muted small pad" }, s.status === "connected" ? "This server has no tools." : "Tools show once the server is connected."),
     tools.map((t) => {
@@ -136,15 +136,26 @@ function serverForm() {
     h(opts.area ? "textarea" : "input", { value: f[key] || "", placeholder: opts.placeholder || "", rows: opts.area ? 3 : null, spellcheck: "false", oninput: (e) => { f[key] = e.target.value; } }),
     opts.help && h("span", { class: "muted small" }, opts.help));
   const stdio = f.type === "stdio";
+  // "NAME=value" / "Name: value" lines; a line without the separator is a mistake to point out, not a key to guess
+  const pairs = (text, sep, trim) => {
+    const bad = lines(text).find((l) => l.indexOf(sep) < 1);
+    if (bad) return flash("error", `"${bad}" needs ${sep === "=" ? "NAME=value" : "Name: value"}.`);
+    return Object.fromEntries(lines(text).map((l) => { const v = l.slice(l.indexOf(sep) + 1); return [l.slice(0, l.indexOf(sep)).trim(), trim ? v.trim() : v]; }));
+  };
   const save = () => {
+    const kv = stdio ? pairs(f.env, "=") : pairs(f.headers, ":", true);
+    if (!kv) return;
     const config = stdio
-      ? { type: "stdio", command: (f.command || "").trim(), args: lines(f.args), env: Object.fromEntries(lines(f.env).map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1)]).filter(([k]) => k)) }
-      : { type: f.type, url: (f.url || "").trim(), headers: Object.fromEntries(lines(f.headers).map((l) => [l.slice(0, l.indexOf(":")).trim(), l.slice(l.indexOf(":") + 1).trim()]).filter(([k]) => k)) };
+      ? { type: "stdio", command: (f.command || "").trim(), args: lines(f.args), env: kv }
+      : { type: f.type, url: (f.url || "").trim(), headers: kv };
     if (stdio && !config.command) return flash("error", "Command is required.");
     if (!stdio && !/^https?:\/\//.test(config.url)) return flash("error", "URL must start with http:// or https://");
     if (stdio && !Object.keys(config.env).length) delete config.env;
     if (!stdio && !Object.keys(config.headers).length) delete config.headers;
-    send({ type: "saveServer", name: (f.name || "").trim(), scope: f.scope, config, old: f.old });
+    // keep what the form doesn't show (oauth, headersHelper, timeouts…); drop only the other transport's fields
+    const rest = { ...f.old?.config };
+    for (const k of ["type", "command", "args", "env", "url", "headers"]) delete rest[k];
+    send({ type: "saveServer", name: (f.name || "").trim(), scope: f.scope, config: { ...rest, ...config }, old: f.old });
   };
   return h("div", { class: "card form" },
     h("b", {}, f.old ? `Edit ${f.old.name}` : "Add an MCP server"),

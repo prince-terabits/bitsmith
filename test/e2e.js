@@ -28,7 +28,7 @@ const vscode = {
     getConfiguration: () => ({ get: (k) => ({ claudePath: "claude", defaultPolicy: "review" })[k] }),
     registerTextDocumentContentProvider: noop, onDidChangeTextDocument: noop, textDocuments: [],
     applyEdit: async (e) => { fs.writeFileSync(e.u.fsPath, e.t); return true; },
-    openTextDocument: async (f) => ({ uri: vscode.Uri.file(f), getText: () => fs.readFileSync(f, "utf8"), lineCount: 1, save: async () => true }),
+    openTextDocument: async (f) => ({ uri: vscode.Uri.file(f), getText: () => fs.readFileSync(f, "utf8"), lineCount: 1, validateRange: (r) => r, save: async () => true }),
     fs: { stat: async (u) => ({ type: fs.statSync(u.fsPath).isDirectory() ? 2 : 1 }) },
     findFiles: async () => [],
     saveAll: async () => true,
@@ -428,6 +428,43 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     provider.chats.delete(c.key); c.shutdown();
     console.log("binary changes ok");
   }
+
+  // Two quick lens clicks: the second hunk's lens still has the line numbers from before the first Keep
+  {
+    const f = path.join(cwd, "hunks.txt"), e = provider.edits;
+    e.snapshotText(f, "a\nb\nc\nd\ne\n");
+    fs.writeFileSync(f, "A\nX\nY\nb\nc\nd\nE\n");
+    const [h1, h2] = e.hunks(f).map((h) => ({ ...h, key: e.hunkKey(f, h) }));
+    e.keepHunk(f, h1);
+    await e.undoHunk(f, h2); // stale: the snapshot grew by two lines above it
+    assert.strictEqual(fs.readFileSync(f, "utf8"), "A\nX\nY\nb\nc\nd\ne\n", "stale lens undoes the right hunk");
+    assert.strictEqual(e.hunks(f).length, 0, "nothing left to review");
+    e.keep(f); fs.rmSync(f);
+    console.log("stale hunk lens ok");
+  }
+
+  // A command that `git add`s a file that was untracked: Undo and Restore must not treat it as created and delete it
+  {
+    const { execSync } = require("child_process");
+    const repo = fs.mkdtempSync(path.join(cwd, "repo-"));
+    const sh = (cmd) => execSync(cmd, { cwd: repo, stdio: "pipe" });
+    fs.writeFileSync(path.join(repo, "t.txt"), "one\n");
+    fs.writeFileSync(path.join(repo, "notes.txt"), "mine\n");
+    sh("git init -q && git add t.txt && git -c user.email=t@t -c user.name=t commit -qm init");
+    const c = provider.createChat();
+    c.checkpoints.push({ id: 1, snaps: new Map() });
+    const marks = [await provider.gitMark(repo)];
+    fs.writeFileSync(path.join(repo, "t.txt"), "two\n");
+    sh("git add -A && git -c user.email=t@t -c user.name=t commit -qm all");
+    await c.captureShell(marks);
+    assert.deepStrictEqual(c.checkpoints[0].shell[0].changed, ["t.txt"], "notes.txt isn't recorded as changed");
+    assert(!provider.edits.snapshots.has(path.join(repo, "notes.txt")), "nor offered for Undo");
+    for (const [file, data] of await c.shellTargets(c.checkpoints)) assert.strictEqual(String(data), "one\n", file);
+    provider.edits.keep(path.join(repo, "t.txt"));
+    provider.chats.delete(c.key); c.shutdown();
+    fs.rmSync(repo, { recursive: true });
+    console.log("git add of untracked file ok");
+  }
   if (process.argv.includes("--live-usage")) {
     provider.onWebview({ type: "ready" });
     provider.setSetting("model", "haiku");
@@ -497,6 +534,14 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert.strictEqual(fs.readFileSync("root.txt", "utf8"), "three\n", "redo re-applies");
     assert.strictEqual(fs.readFileSync("nested/made.txt", "utf8"), "made\n");
     console.log("restore + redo of shell changes ok");
+    // the rewind survives the CLI restarting before the next message (switching chats, a settings change, a crash)
+    await send("The secret word is ZEBRA. Reply with just OK.", 703);
+    await provider.restore(703);
+    ch.restart();
+    const asked = await send("What secret word did I give you in this conversation? If none, reply with just NONE.", 704);
+    const answer = asked.filter((m) => m.type === "text").map((m) => m.text).join("");
+    assert(!/ZEBRA/i.test(answer), "the restored message is gone after a restart: " + answer);
+    console.log("rewind survives restart ok:", answer.trim());
     provider.shutdown();
     process.exit(0);
   }

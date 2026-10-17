@@ -75,7 +75,9 @@ class ToolsPanel {
         for (const cl of this.live()) await cl.request({ subtype: "reload_skills" });
         return this.load();
       }
-      case "openSettings": return vscode.window.showTextDocument(vscode.Uri.file(this.settingsFile));
+      case "openSettings":
+        if (!fs.existsSync(this.settingsFile)) this.editSettings(() => {}); // not made until the first rule: start it as {}
+        return vscode.window.showTextDocument(vscode.Uri.file(this.settingsFile));
     }
   }
 
