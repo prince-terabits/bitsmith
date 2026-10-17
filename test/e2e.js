@@ -131,6 +131,21 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     console.log("recent chats refresh ok");
   }
 
+  // forks (Retry/Restore copies) and continuations after compaction list once, as their newest file
+  {
+    const dir = provider.sessionDir(), ids = ["a", "b", "c", "d"].map((x) => `${x.repeat(8)}-2222-3333-4444-555555555555`);
+    const line = (e) => JSON.stringify({ type: "user", ...e }) + "\n";
+    const write = (id, text, t) => { fs.writeFileSync(path.join(dir, id + ".jsonl"), text); fs.utimesSync(path.join(dir, id + ".jsonl"), t, t); };
+    write(ids[0], line({ uuid: "u1", message: { content: "fork me" } }), 1000);
+    write(ids[1], line({ uuid: "u1", message: { content: "fork me" } }) + line({ uuid: "u2", message: { content: "retried" } }), 2000);
+    write(ids[2], line({ uuid: "u3", isCompactSummary: true, message: { content: `continued… transcript at: ${dir}/${ids[1]}.jsonl` } }) + JSON.stringify({ type: "ai-title", aiTitle: "Fork me" }) + "\n", 3000);
+    write(ids[3], line({ uuid: "u4", message: { content: "another chat" } }), 500);
+    const listed = provider.sessions(60).map((s) => s.id).filter((id) => ids.includes(id));
+    assert.deepStrictEqual(listed, [ids[2], ids[3]], "one entry per chat: " + listed);
+    for (const id of ids) fs.rmSync(path.join(dir, id + ".jsonl"));
+    console.log("history dedupe ok");
+  }
+
   // delete chat: transcript and its per-session folders go away; bad ids are refused
   {
     const id = "11111111-2222-3333-4444-555555555555";

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.11.4
+
+- **Fix: the same chat showed many times in history.** Retry, Restore and Edit continue a chat in a copy of its
+  session file, and a chat continued after compaction starts a new file; history listed each one. It now shows
+  one entry per chat, its newest file. Searching inside chats still finds the older copies.
+
+## 1.11.3
+
+- **Fix: a compaction in the middle of a reply split it in two.** In a reopened chat the "Conversation
+  auto-compacted" line ended the reply, so its first half got its own Retry and Undo buttons. It now stays one reply,
+  and a compaction between replies sits below the previous reply's buttons.
+
 ## 1.11.2
 
 - **Fix: clicking an image named in a reply did nothing.** Files now open with VS Code's own opener, so images show

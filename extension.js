@@ -1343,10 +1343,10 @@ class ChatProvider {
   sessions(limit) {
     let files = [];
     try { files = fs.readdirSync(this.sessionDir()).filter((f) => f.endsWith(".jsonl")); } catch {}
-    return files
+    return latestCopies(files
       .map((f) => { const file = path.join(this.sessionDir(), f); try { return { id: f.slice(0, -6), file, time: fs.statSync(file).mtimeMs }; } catch { return null; } })
       .filter(Boolean)
-      .sort((a, b) => b.time - a.time)
+      .sort((a, b) => b.time - a.time))
       .slice(0, limit)
       .map((s) => ({ ...s, title: sessionTitle(s.file) }))
       .filter((s) => s.title);
@@ -1677,6 +1677,22 @@ function parseUserText(raw) {
     }
   }
   return { text: raw.replace(CONTEXT_PREFIX, "").replace(OLD_PREFIX, ""), chips };
+}
+
+// One chat can span several session files: Retry, Restore and Edit fork a copy (same first prompt), and a chat
+// continued after compaction starts a new file whose summary names the previous one ("…transcript at: <id>.jsonl").
+// Given newest first, keeps only the newest file of each chat.
+// ponytail: only the first 64 KB is read, so a first prompt longer than that (a pasted image) isn't matched.
+function latestCopies(list) {
+  const firstPrompt = (file) => { try { return readLines(file, 0, 65536).map(parse).find((e) => e && ((e.isCompactSummary && typeof e.message?.content === "string") || userText(e))); } catch {} };
+  const withFirst = list.map((s) => [s, firstPrompt(s.file)]);
+  const older = new Set(withFirst.map(([, f]) => f?.isCompactSummary && f.message.content.match(/transcript at: \S*?([0-9a-f-]{36})\.jsonl/)?.[1]));
+  const firsts = new Set();
+  return withFirst.filter(([s, f]) => {
+    const copy = older.has(s.id) || (f?.uuid && firsts.has(f.uuid));
+    if (f?.uuid) firsts.add(f.uuid);
+    return !copy;
+  }).map(([s]) => s);
 }
 
 function readLines(file, from, size) {

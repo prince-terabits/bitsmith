@@ -673,11 +673,15 @@ function finalize(ms) {
   const answer = [...t.body.querySelectorAll(":scope > .md")].map((e) => e.raw).join("\n\n");
   if (answer || t.payload) {
     const cp = t.payload?.checkpoint;
-    t.body.append(h("div", { class: "msg-actions" },
+    // above a trailing notice (a compaction between replies), so the actions stay with the answer
+    const actions = h("div", { class: "msg-actions" },
       answer && h("button", { class: "icon-btn", title: "Copy answer", onclick: () => send({ type: "copy", text: answer }) }, icon("copy")),
       // Retry rewinds to before this message and runs it again in place, instead of sending a duplicate.
       t.payload && h("button", { class: "icon-btn", title: "Retry this message", onclick: () => { if (!S.busy) cp ? send({ type: "editMessage", checkpoint: cp, text: t.payload.text, retry: true }) : dispatch(t.payload); } }, icon("refresh")),
-      cp && h("button", { class: "icon-btn restore-btn", title: "Restore checkpoint: undo this message's file changes and remove it and everything after", onclick: () => !S.busy && send({ type: "restore", checkpoint: cp }) }, icon("discard"))));
+      cp && h("button", { class: "icon-btn restore-btn", title: "Restore checkpoint: undo this message's file changes and remove it and everything after", onclick: () => !S.busy && send({ type: "restore", checkpoint: cp }) }, icon("discard")));
+    let first = t.body.lastElementChild;
+    while (first?.previousElementSibling?.matches(".notice") && first.matches(".notice")) first = first.previousElementSibling;
+    first?.matches(".notice") ? first.before(actions) : t.body.append(actions);
   }
 }
 
@@ -933,8 +937,9 @@ function compact() {
 }
 
 // A line between replies (task finished, conversation compacted); inside the reply while one is running.
-function eventRow(el) {
-  if (!S.busy) finalize();
+// A compaction can land mid-reply (and a reopened chat is never busy), so it never ends the turn.
+function eventRow(el, keepTurn) {
+  if (!S.busy && !keepTurn) finalize();
   (turn ? turn.body : scroll).append(el);
   scrollDown();
 }
@@ -1159,7 +1164,7 @@ function handle(m) {
     case "autoTurn": if (!turn) startTurn(null); setBusy(true); working(true); return;
     case "queue": cur.queue = (m.items || []).map((p) => ({ images: [], items: [], chips: [], ...p })); return renderQueue();
     case "context": cur.context = { used: m.used, window: m.window, threshold: m.threshold }; return renderMeter();
-    case "notice": return eventRow(h("div", { class: "task-event notice" }, icon(m.icon || "info"), h("span", { class: "grow" }, m.text)));
+    case "notice": return eventRow(h("div", { class: "task-event notice" }, icon(m.icon || "info"), h("span", { class: "grow" }, m.text)), m.icon === "fold");
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
