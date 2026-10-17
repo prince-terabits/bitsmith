@@ -142,7 +142,7 @@ class EditTracker {
         continue;
       }
       const h = this.hunks(file);
-      if (!h.length && this.current(file) !== null) { this.snapshots.delete(file); continue; } // nothing left to review
+      if (!h.length && this.current(file) !== null && this.snapshots.get(file) !== null) { this.snapshots.delete(file); continue; } // nothing left to review (a created empty file still is)
       out.push({ file, ...stats(h), created: this.snapshots.get(file) === null, deleted: this.current(file) === null });
     }
     return out;
@@ -256,6 +256,7 @@ class EditTracker {
   async undoHunk(file, h) {
     h = this.liveHunk(file, h);
     if (!h) return this.refresh();
+    if (this.snapshots.get(file) === null) return this.undo(file); // a created file is one hunk: undoing it deletes the file
     const before = lines(this.snapshots.get(file) ?? "");
     const doc = await vscode.workspace.openTextDocument(file);
     const after = lines(doc.getText());

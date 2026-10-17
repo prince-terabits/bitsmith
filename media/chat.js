@@ -407,6 +407,7 @@ function scrollDown(force) {
 
 function showEmpty(on) {
   if (cur !== shown) return; // the hero and recent chats belong to the chat on screen
+  if (on && empty.parentNode !== scroll) scroll.prepend(empty); // the hero lives in whichever pane is on screen
   empty.classList.toggle("hidden", !on);
   showRecent();
 }
@@ -1098,9 +1099,7 @@ function showChat(key, tell) {
   const caughtUp = c.busy || c.unread; // it kept going while hidden: show the latest
   c.unread = c.attention = false;
   for (const x of chats.values()) x.el.classList.toggle("hidden", x !== c);
-  const started = !!scroll.querySelector(".turn");
-  if (!started) scroll.prepend(empty); // the hero lives in whichever pane is on screen
-  showEmpty(!started);
+  showEmpty(!scroll.querySelector(".turn"));
   setBusy(c.busy);
   renderTodos();
   renderTasks();
@@ -1202,8 +1201,9 @@ function handle(m) {
     case "user": return startTurn({ text: m.text, chips: m.chips || [], images: m.images || [] }, m.checkpoint ? { checkpoint: m.checkpoint, text: m.text, chips: m.chips || [], items: [], images: m.images || [], useActive: false } : null);
     case "editCancelled": {
       const b = scroll.querySelector(`.turn[data-checkpoint="${m.checkpoint}"] .user-msg`);
-      b?.classList.remove("pending");
-      b?.cancelEdit?.();
+      if (!b?.classList.contains("pending")) return; // a cancelled Retry: leave an open edit alone
+      b.classList.remove("pending");
+      b.cancelEdit?.();
       return;
     }
     case "approvalsCancelled":

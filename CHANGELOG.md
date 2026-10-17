@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.11.7
+
+Low bug fixes:
+- **Restoring a chat's first message shows the start screen** instead of a blank pane (the hero could be left in
+  another chat's pane).
+- **Cancelling the Retry confirmation no longer closes an inline edit** you have open on that message.
+- **Undoing a file Claude created deletes it** (hunk Undo left an empty file), and an empty created file now shows
+  up for review.
+- **Restore puts back a binary file Claude overwrote with Write** byte for byte; it was snapshotted as text.
+- **The browser tool no longer leaves a temp folder behind when Chrome isn't installed.**
+
 ## 1.11.6
 
 Medium bug fixes:

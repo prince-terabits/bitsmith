@@ -403,7 +403,7 @@ class Chat {
     if (this.p.inFolder(file)) { this.edits.snapshot(file); this.touched.add(norm(file)); } // scratch files elsewhere (e.g. /tmp) aren't changes to review
     const cp = this.checkpoints[this.checkpoints.length - 1];
     if (cp && !cp.snaps.has(file)) {
-      try { cp.snaps.set(file, fs.readFileSync(file, "utf8")); } catch { cp.snaps.set(file, null); }
+      try { const buf = fs.readFileSync(file); cp.snaps.set(file, isBinary(buf) ? buf : buf.toString("utf8")); } catch { cp.snaps.set(file, null); }
     }
   }
 
@@ -472,7 +472,7 @@ class Chat {
     const file = this.p.checkpointFile(this.sessionId);
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      const data = this.checkpoints.map(({ key, sessionId, resumeAt, snaps, shell }) => ({ key, sessionId, resumeAt, snaps: [...snaps], shell }));
+      const data = this.checkpoints.map(({ key, sessionId, resumeAt, snaps, shell }) => ({ key, sessionId, resumeAt, snaps: [...snaps].map(([f, t]) => [f, Buffer.isBuffer(t) ? { b64: t.toString("base64") } : t]), shell }));
       fs.writeFileSync(file, JSON.stringify(data));
     } catch {}
   }
@@ -1244,7 +1244,7 @@ class ChatProvider {
 
   loadCheckpoints(sessionId) {
     try {
-      return JSON.parse(fs.readFileSync(this.checkpointFile(sessionId), "utf8")).map((c) => ({ ...c, snaps: new Map(c.snaps) }));
+      return JSON.parse(fs.readFileSync(this.checkpointFile(sessionId), "utf8")).map((c) => ({ ...c, snaps: new Map(c.snaps.map(([f, t]) => [f, t?.b64 != null ? Buffer.from(t.b64, "base64") : t])) }));
     } catch { return []; }
   }
 

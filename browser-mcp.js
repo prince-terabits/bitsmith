@@ -48,13 +48,14 @@ const writeState = (data) => { if (process.env.BITSMITH_STATE) try { data ? fs.w
 
 // The kept profile when asked for and free; otherwise (another chat has it open) a throwaway one, deleted at the end.
 async function start() {
+  const exe = findChrome(); // before making a temp profile, so a missing Chrome leaves nothing behind
   const keep = process.env.BITSMITH_PROFILE;
   temp = !keep || inUse(keep);
   if (temp) profile = fs.mkdtempSync(path.join(os.tmpdir(), "bitsmith-browser-"));
   else fs.mkdirSync((profile = keep), { recursive: true });
   const args = ["--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble",
     "--window-size=1280,800", ...(headless ? ["--headless=new"] : process.env.DISPLAY ? ["--ozone-platform=x11"] : []), "about:blank"];
-  chrome = spawn(findChrome(), args, { stdio: ["ignore", "ignore", "pipe"], env: hostEnv() });
+  chrome = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], env: hostEnv() });
   port = await new Promise((resolve, reject) => {
     let err = "";
     const fail = (why) => { clearTimeout(timer); try { chrome.kill(); } catch {} dropProfile(); reject(new Error(`Chrome did not start (${why}): ${err.trim().split("\n").slice(-6).join("\n")}`)); };

@@ -443,6 +443,29 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     console.log("stale hunk lens ok");
   }
 
+  // Created files: an empty one still shows for review, and undoing a created file's hunk deletes it.
+  // A binary file Claude overwrites keeps its bytes in the checkpoint, through a save and load.
+  {
+    const e = provider.edits, empty = path.join(cwd, "empty.txt"), made = path.join(cwd, "made.txt");
+    e.snapshot(empty); fs.writeFileSync(empty, "");
+    assert(e.files().some((f) => f.file === empty && f.created), "empty created file is listed");
+    e.snapshot(made); fs.writeFileSync(made, "x\n");
+    await e.undoHunk(made, e.hunks(made)[0]);
+    assert(!fs.existsSync(made), "undoing a created file's hunk deletes it");
+    e.keep(empty); fs.rmSync(empty);
+    const c = provider.createChat(), bin = Buffer.from([0x89, 0x50, 0, 1, 0xff]), f = path.join(cwd, "pic.bin");
+    fs.writeFileSync(f, bin);
+    c.checkpoints.push({ id: 1, snaps: new Map() });
+    c.snapshot(f);
+    c.sessionId = "test-binary-snap";
+    c.saveCheckpoints();
+    assert(provider.loadCheckpoints(c.sessionId)[0].snaps.get(f).equals(bin), "binary snapshot round-trips");
+    fs.rmSync(provider.checkpointFile(c.sessionId));
+    e.keep(f); fs.rmSync(f);
+    provider.chats.delete(c.key); c.shutdown();
+    console.log("created and binary snapshots ok");
+  }
+
   // A command that `git add`s a file that was untracked: Undo and Restore must not treat it as created and delete it
   {
     const { execSync } = require("child_process");
