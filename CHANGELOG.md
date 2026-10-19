@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.24.1
+
+- **More models shows every model:** submenus stay inside the window (shifted up, scrolling if still too tall), and
+  older models are grouped by family: Fable, Opus, Sonnet, Haiku.
+
+## 1.24.0
+
+- **Model menu like Claude's:** the latest Fable, Opus, Sonnet and Haiku with a line on each, then **Effort ›** (its
+  levels in a submenu) and **More models ›** (older models). The separate effort button is gone; the model button
+  shows the effort next to the name ("Opus 5.5 Medium"). Checkmarks in menus sit on the right.
+
 ## 1.23.0
 
 - **Simpler Mode menu, like Copilot's:** just the names (hover for what each does): Agent, then Ask and your custom

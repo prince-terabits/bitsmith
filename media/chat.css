@@ -285,7 +285,9 @@ textarea { font: inherit; color: var(--vscode-input-foreground); }
 .menu-item { display: flex; gap: 6px; padding: 5px 8px; border-radius: 5px; cursor: pointer; align-items: flex-start; }
 .menu-item:hover, .menu-item.active { background: var(--vscode-menu-selectionBackground, var(--hover)); color: var(--vscode-menu-selectionForeground, var(--fg)); }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--vscode-menu-separatorBackground, var(--border)); }
-.menu-item .check { width: 14px; flex: none; padding-top: 1px; }
+.menu-item .check { width: 14px; flex: none; padding-top: 1px; order: 3; color: var(--focus); } /* on the right, like Claude's model menu */
+.menu-hint { flex: none; display: flex; align-items: center; gap: 4px; }
+.menu.sub { position: absolute; min-width: 160px; max-height: calc(100vh - 12px); overflow-y: auto; }
 .menu-text { min-width: 0; flex: 1; }
 .menu-text .codicon { margin-right: 5px; }
 

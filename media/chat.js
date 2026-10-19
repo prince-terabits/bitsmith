@@ -103,7 +103,6 @@ const queuePanel = h("div", { class: "queue hidden" });
 const meterBtn = h("button", { class: "context-meter hidden", onclick: () => compact() });
 const modeBtn = h("button", { class: "pill" });
 const modelBtn = h("button", { class: "pill" });
-const effortBtn = h("button", { class: "pill" });
 const policyBtn = h("button", { class: "pill subtle" });
 const dropOverlay = h("div", { class: "drop" }, icon("cloud-upload"), h("span", {}, "Drop to attach files, folders or images"));
 
@@ -112,7 +111,7 @@ const editBar = h("div", { class: "edit-bar hidden" }, icon("edit"), h("span", {
 
 const box = h("div", { class: "box" },
   dropOverlay, editBar, chips, input, slash,
-  h("div", { class: "toolbar" }, modeBtn, modelBtn, effortBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
+  h("div", { class: "toolbar" }, modeBtn, modelBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
 );
 const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
   h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "VS Code only lets panels like this one receive drops while Shift is held" }, "/ for commands · hold Shift to drop files")));
@@ -140,12 +139,34 @@ $("#app").append(...(inTab ? [tabHead] : []), tabsBar, composer);
 let openMenu = null;
 function closeMenu() { openMenu?.remove(); openMenu = null; }
 document.addEventListener("mousedown", (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); });
+// Rows: {value, label, icon?, description?, title? (tooltip), hint? (muted, right)}, {sep: true}, or a row with
+// sub: {options, current, onPick} that opens a submenu beside it.
+function menuItems(el, options, current, onPick) {
+  return options.map((o) => {
+    if (o.sep) return h("div", { class: "menu-sep" });
+    const row = h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, title: o.title || "",
+      onmouseenter: () => openSub(el, row, o.sub),
+      onclick: () => { if (o.sub) return openSub(el, row, o.sub); closeMenu(); onPick(o.value); } },
+      h("span", { class: "check" }, o.value === current ? icon("check") : null),
+      h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label), o.description && h("div", { class: "muted small" }, o.description)),
+      (o.hint || o.sub) && h("span", { class: "menu-hint muted" }, o.hint || "", o.sub && icon("chevron-right")));
+    return row;
+  });
+}
+function openSub(el, row, sub) {
+  el.querySelector(":scope > .menu.sub")?.remove();
+  if (!sub) return;
+  const s = h("div", { class: "menu sub" });
+  s.append(...menuItems(s, sub.options, sub.current, sub.onPick));
+  el.append(s);
+  const r = el.getBoundingClientRect(); // beside the menu; in a narrow sidebar, as far right as fits; never off the bottom
+  s.style.top = Math.max(6 - r.top, Math.min(row.offsetTop - 5, window.innerHeight - 6 - s.offsetHeight - r.top)) + "px";
+  s.style.left = Math.min(r.width + 4, window.innerWidth - 6 - s.offsetWidth - r.left) + "px";
+}
 function menu(anchor, title, options, current, onPick) {
   closeMenu();
-  const el = h("div", { class: "menu" }, title && h("div", { class: "menu-title" }, title),
-    options.map((o) => o.sep ? h("div", { class: "menu-sep" }) : h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, title: o.title || "", onclick: () => { closeMenu(); onPick(o.value); } },
-      h("span", { class: "check" }, o.value === current ? icon("check") : null),
-      h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label), o.description && h("div", { class: "muted small" }, o.description)))));
+  const el = h("div", { class: "menu" }, title && h("div", { class: "menu-title" }, title));
+  el.append(...menuItems(el, options, current, onPick));
   document.body.append(el);
   const r = anchor.getBoundingClientRect();
   el.style.left = Math.max(6, Math.min(r.left, window.innerWidth - el.offsetWidth - 6)) + "px";
@@ -203,10 +224,7 @@ function renderToolbar() {
   modeBtn.replaceChildren(icon(mode.icon), mode.label, icon("chevron-down", "chev"));
   const model = currentModel();
   const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
-  modelBtn.replaceChildren(name, icon("chevron-down", "chev"));
-  const levels = model.supportedEffortLevels || [];
-  effortBtn.classList.toggle("hidden", !levels.length && !S.effort);
-  effortBtn.replaceChildren(EFFORT_LABEL[S.effort] || S.effort, icon("chevron-down", "chev"));
+  modelBtn.replaceChildren(name, S.effort && h("span", { class: "muted" }, EFFORT_LABEL[S.effort] || S.effort), icon("chevron-down", "chev"));
   const policy = POLICIES.find((p) => p.value === S.policy) || POLICIES[0];
   policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
   policyBtn.classList.toggle("danger", S.policy === "bypass");
@@ -218,12 +236,33 @@ modeBtn.onclick = () => {
   menu(modeBtn, "", [plain(agent), { sep: true }, ...rest.map(plain), { sep: true }, { value: "configure", label: "Configure Custom Agents…" }], S.mode,
     (v) => v === "configure" ? send({ type: "configureAgents" }) : setSetting("mode", v));
 };
-modelBtn.onclick = () => menu(modelBtn, "Model", (S.models.length ? S.models : [{ value: "default", displayName: "Default" }]).map((m) => ({ value: m.value, label: m.displayName || m.value, description: m.description })), S.model, (v) => {
-  setSetting("model", v);
+// Like Claude's model menu: the latest of each family, Effort, then older models under More models
+const MAIN_MODELS = ["fable", "opus", "sonnet", "haiku"];
+modelBtn.onclick = () => {
+  const ms = S.models.length ? S.models : [{ value: "default", displayName: "Default" }];
+  let main = ms.filter((m) => MAIN_MODELS.includes(m.value)).sort((a, b) => MAIN_MODELS.indexOf(a.value) - MAIN_MODELS.indexOf(b.value));
+  if (!main.length) main = ms;
+  const family = (m) => { const i = MAIN_MODELS.findIndex((f) => m.value.includes(f)); return i < 0 ? 9 : i; };
+  const more = ms.filter((m) => m.value !== "default" && !main.includes(m)).sort((a, b) => family(a) - family(b));
+  const def = ms.find((m) => m.value === "default")?.resolvedModel; // "Default" shows as the model it stands for
+  const cur = S.model === "default" ? main.find((m) => m.resolvedModel === def)?.value || "default" : S.model;
+  const pick = (v) => {
+    setSetting("model", v);
+    const levels = currentModel().supportedEffortLevels || [];
+    if (S.effort && !levels.includes(S.effort)) setSetting("effort", "");
+  };
   const levels = currentModel().supportedEffortLevels || [];
-  if (S.effort && !levels.includes(S.effort)) setSetting("effort", "");
-});
-effortBtn.onclick = () => menu(effortBtn, "Thinking effort", ["", ...(currentModel().supportedEffortLevels || [])].map((v) => ({ value: v, label: EFFORT_LABEL[v] || v, description: v === "" ? "Use the model's default" : null })), S.effort, (v) => setSetting("effort", v));
+  menu(modelBtn, "", [
+    ...main.map((m) => ({ value: m.value, label: m.displayName || m.value, description: m.description })),
+    levels.length && { sep: true },
+    levels.length && { value: "effort", label: "Effort", hint: EFFORT_LABEL[S.effort] || S.effort, sub: {
+      options: ["", ...levels].map((v) => ({ value: v, label: EFFORT_LABEL[v] || v, title: v ? "" : "Use the model's default" })),
+      current: S.effort, onPick: (v) => setSetting("effort", v) } },
+    more.length && { sep: true },
+    more.length && { value: "more", label: "More models", sub: {
+      options: more.map((m) => ({ value: m.value, label: m.displayName || m.value, title: m.description })), current: cur, onPick: pick } },
+  ].filter(Boolean), cur, pick);
+};
 policyBtn.onclick = () => menu(policyBtn, "Approvals", POLICIES, S.policy, (v) => setSetting("policy", v));
 
 // ---------- context chips ----------
