@@ -59,6 +59,42 @@ assert.deepStrictEqual(diffLines(["a", "c"], ["a", "b", "c"]), [{ oStart: 1, oEn
 assert.deepStrictEqual(diffLines(["a", "b", "c"], ["a", "c"]), [{ oStart: 1, oEnd: 2, nStart: 1, nEnd: 1 }]);
 assert.strictEqual(diffLines(lines("1\n2\n3\n4\n5"), lines("1\nX\n3\n4\nY")).length, 2);
 assert.deepStrictEqual(ext.editStats("Edit", { old_string: "a\nb", new_string: "a\nc\nd" }), { added: 2, removed: 1 });
+// diff rows: 2 lines of context around each hunk, a gap between far-apart hunks and between edits
+assert.deepStrictEqual(ext.diffRows("Edit", { old_string: "1\n2\n3\n4\n5\n6\n7\n8\n9", new_string: "1\nX\n3\n4\n5\n6\n7\nY\n9" }).map((r) => r.k + r.t).join(","),
+  " 1,-2,+X, 3, 4,…, 6, 7,-8,+Y, 9");
+assert.deepStrictEqual(ext.diffRows("MultiEdit", { edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] }).map((r) => r.k + r.t).join(","), "-a,+b,…,-c,+d");
+assert.strictEqual(ext.diffRows("Write", { content: "x\n".repeat(500) }, 400).at(-1).t, "101 more lines");
+{ // pages cut at user messages: the last 2 turns, then whatever is left
+  const items = ["user", "text", "user", "text", "user", "text"].map((type) => ({ type }));
+  assert.strictEqual(ext.pageStart(items, 6, 2), 2);
+  assert.strictEqual(ext.pageStart(items, 2, 2), 0);
+}
+{ // undoing one step works back from the file now, keeping later edits; anything ambiguous refuses
+  const edit = (o, n, extra) => ({ name: "Edit", input: { old_string: o, new_string: n, ...extra } });
+  assert.strictEqual(ext.stepBefore([edit("a", "b")], "x b LATER"), "x a LATER");
+  assert.strictEqual(ext.stepBefore([edit("a", "b"), edit("c", "d")], "b d"), "a c");
+  assert.strictEqual(ext.stepBefore([edit("a", "b")], "b b"), undefined, "which b?");
+  assert.strictEqual(ext.stepBefore([edit("a", "b", { replace_all: true })], "b b"), "a a");
+  assert.strictEqual(ext.stepBefore([edit("a", "")], "x"), undefined, "a deletion has nothing to find");
+  assert.strictEqual(ext.stepBefore([edit("a", "b")], "gone"), undefined);
+  assert.strictEqual(ext.stepBefore([{ name: "Write", input: { content: "new" }, before: null }], "new"), null, "it created the file");
+  assert.strictEqual(ext.stepBefore([{ name: "Write", input: { content: "new" }, before: "old" }], "new"), "old");
+  assert.strictEqual(ext.stepBefore([{ name: "Write", input: { content: "new" } }], "new"), undefined, "unknown before");
+  assert.strictEqual(ext.stepBefore([{ name: "Write", input: { content: "new" }, before: "old" }], "edited"), undefined);
+}
+// A fork of a compacted chat starts at the compaction; replay pulls what came before from the session the summary names.
+{
+  const dir = fs.mkdtempSync(path.join(require("os").tmpdir(), "bs-fork-")), older = path.join(dir, "old.jsonl"), fork = path.join(dir, "fork.jsonl");
+  const say = (uuid, parentUuid, type, text) => ({ uuid, parentUuid, type, message: { role: type, content: type === "user" ? text : [{ type: "text", text }] } });
+  const boundary = { uuid: "b", parentUuid: null, logicalParentUuid: "a2", type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto", preTokens: 9000, postTokens: 900 } };
+  const summary = { ...say("s", "b", "user", `Summary. read the full transcript at: ${older}`), isCompactSummary: true };
+  const jsonl = (es) => es.map((e) => JSON.stringify(e)).join("\n") + "\n";
+  fs.writeFileSync(older, jsonl([say("u1", null, "user", "first"), say("a1", "u1", "assistant", "one"), say("u2", "a1", "user", "second"), say("a2", "u2", "assistant", "two"), boundary, summary]));
+  fs.writeFileSync(fork, jsonl([boundary, summary, say("u3", "s", "user", "third"), say("a3", "u3", "assistant", "three")]));
+  const items = ext.replay(fork, (f) => f).filter((x) => x.type === "user" || x.type === "notice").map((x) => x.type === "user" ? x.text : "notice");
+  assert.deepStrictEqual(items, ["first", "second", "notice", "third"], "history before the compaction comes back");
+  fs.rmSync(dir, { recursive: true });
+}
 const parsed = ext.parseUserText("<context>\nCurrent file: src/x.ts (lines 3-5 selected)\n```\ncode\n```\nAttached:\n- src/lib/ (folder)\n- a.txt (file)\n</context>\n\nfix it");
 assert.strictEqual(parsed.text, "fix it");
 assert.deepStrictEqual(parsed.chips.map((c) => c.kind + ":" + c.rel), ["file:src/x.ts", "folder:src/lib", "file:a.txt"]);
@@ -222,6 +258,16 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert.deepStrictEqual(said, [["r1", "allow"]], "an ordinary edit applies, the tasks file waits");
     assert(posts.slice(st).some((m) => m.type === "permission" && m.id === "r2" && /run commands/.test(m.risk)));
     c.answer({ id: "r2", allow: false });
+    // a file with unsaved changes asks too, with the change shown on the card
+    const dirtyFile = path.join(cwd, "dirty.txt");
+    vscode.workspace.textDocuments.push({ uri: vscode.Uri.file(dirtyFile), isDirty: true });
+    c.ask("r3", { tool_name: "Edit", input: { file_path: dirtyFile, old_string: "a", new_string: "b" } });
+    vscode.workspace.textDocuments.length = 0;
+    assert(!said.some(([id]) => id === "r3"), "not applied on its own");
+    const card = posts.slice(st).find((m) => m.type === "permission" && m.id === "r3");
+    assert.match(card.risk, /unsaved changes/);
+    assert.deepStrictEqual(card.rows.map((r) => r.k + r.t), ["-a", "+b"]);
+    c.answer({ id: "r3", allow: false });
     c.claude = realClaude;
     provider.edits.snapshots.clear();
     console.log("risky edits ask ok");

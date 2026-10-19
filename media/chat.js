@@ -76,7 +76,7 @@ function highlight(code, lang = "") {
 // ---------- state ----------
 const S = {
   models: [], commands: [], model: "default", effort: "", mode: "agent", policy: "review",
-  active: null, useActive: true, items: [], images: [], busy: false, last: null, todos: [], sessions: [],
+  active: null, useActive: true, items: [], images: [], busy: false, last: null, todos: [], sessions: [], pinned: [],
 };
 let turn = null; // the response being streamed into
 let nextCheckpoint = 1;
@@ -420,18 +420,21 @@ function renderEmpty() {
     h("p", { class: "muted" }, "Build, fix and explain code with Claude Code."),
     h("div", { class: "hints muted small" },
       h("span", {}, icon("add"), "attach files"), h("span", {}, icon("symbol-event"), "/ commands"), h("span", {}, icon("diff"), "Keep or Undo edits"))));
+  const row = (s, pinned) => h("div", { class: "recent-item", role: "button", tabindex: "0", title: s.title, onclick: () => send({ type: "loadSession", id: s.id }) },
+    icon(pinned ? "pinned" : "comment-discussion"), h("span", { class: "ellipsis" }, s.title), h("span", { class: "muted small time" }, ago(s.time)),
+    h("button", { class: "icon-btn pin-chat", title: pinned ? "Unpin" : "Pin (up to 5)", "aria-label": `${pinned ? "Unpin" : "Pin"} chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "pinSession", id: s.id }); } }, icon(pinned ? "pinned" : "pin")),
+    h("button", { class: "icon-btn delete-chat", title: "Delete chat", "aria-label": `Delete chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "deleteSession", id: s.id }); } }, icon("trash")));
+  const recentHead = h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Recent chats"), h("span", { class: "grow" }),
+    h("button", { class: "link-btn", onclick: () => send({ type: "history" }) }, "View all"));
   recentPanel.replaceChildren(
-    h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Recent chats"), h("span", { class: "grow" }),
-      h("button", { class: "link-btn", onclick: () => send({ type: "history" }) }, "View all")),
-    ...S.sessions.slice(0, 5).map((s) => h("div", { class: "recent-item", role: "button", tabindex: "0", title: s.title, onclick: () => send({ type: "loadSession", id: s.id }) },
-      icon("comment-discussion"), h("span", { class: "ellipsis" }, s.title), h("span", { class: "muted small time" }, ago(s.time)),
-      h("button", { class: "icon-btn delete-chat", title: "Delete chat", "aria-label": `Delete chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "deleteSession", id: s.id }); } }, icon("trash")))));
+    ...(S.pinned.length ? [h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Pinned")), ...S.pinned.map((s) => row(s, true))] : []),
+    ...(S.sessions.length ? [recentHead, ...S.sessions.slice(0, 5).map((s) => row(s, false))] : []));
   showRecent();
 }
 
 function showRecent() {
   if (cur !== shown) return;
-  recentPanel.classList.toggle("hidden", !S.sessions.length || cur.loading || !!scroll.querySelector(".turn"));
+  recentPanel.classList.toggle("hidden", !(S.sessions.length || S.pinned.length) || cur.loading || !!scroll.querySelector(".turn"));
 }
 
 function ago(t) {
@@ -556,12 +559,14 @@ function addStep(m) {
 
 function stepBox(m) {
   const subject = m.file
-    ? h("span", { class: "chip file-link", "data-file": m.file, title: m.detail }, icon("file"), h("span", { class: "ellipsis" }, base(m.detail) + (m.range ? ` ${m.range}` : "")))
+    ? h("span", { class: "chip file-link", "data-file": m.file, "data-line": m.range?.split("-")[0] || "", "data-end": m.range?.split("-")[1] || "", title: m.detail }, icon("file"), h("span", { class: "ellipsis" }, base(m.detail) + (m.range ? ` ${m.range}` : "")))
     : m.detail ? h(m.code ? "code" : "span", { class: "detail ellipsis", title: m.detail }, m.detail) : null;
   const row = h("summary", { class: "step running", "data-id": m.id, onclick: (e) => { if (!box.classList.contains("has-body")) e.preventDefault(); else box.dataset.touched = "1"; } },
     h("span", { class: "status" }, icon("loading", "spin")), icon(m.icon || "tools", "step-icon"), h("span", { class: "title" }, m.title), subject,
     h("span", { class: "meta" }), icon("chevron-right", "chev step-chev"));
   const box = h("details", { class: "step-box" }, row, h("div", { class: "step-body" }));
+  row.dataset.start = m.at || Date.now(); // for the step's duration
+  if (m.name === "Grep" || m.name === "Glob") { box.search = m.name; box.searchPath = m.searchPath; }
   if (m.full) ioBlock(box, m.name === "Bash" ? "Command" : m.name === "Agent" || m.name === "Task" ? "Prompt" : "Input", m.full);
   return box;
 }
@@ -589,15 +594,95 @@ function settleAgent(row) {
 
 function ioBlock(box, label, text, cls = "") {
   box.classList.add("has-body");
+  const code = text.includes("\x1b[") ? h("code", { html: ansi(text) }) : h("code", {}, text); // a terminal's colors
   $(".step-body", box).append(h("div", { class: `codeblock io ${cls}` },
     h("div", { class: "codebar" }, h("span", {}, label), h("button", { class: "icon-btn copy-code", title: "Copy" }, icon("copy"))),
-    h("pre", {}, h("code", {}, text))));
+    h("pre", {}, code)));
+}
+
+// Terminal output to HTML: SGR colors and bold become spans, every other escape sequence goes.
+function ansi(text) {
+  let fg = 0, bold = false, out = "";
+  for (const part of text.split(/(\x1b\[[\d;]*m)/)) {
+    const sgr = part.match(/^\x1b\[([\d;]*)m$/);
+    if (!sgr) {
+      const t = escapeHtml(part.replace(/\x1b\[[\d;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b./g, ""));
+      out += t && (fg || bold) ? `<span class="${[fg && "ansi-" + fg, bold && "ansi-bold"].filter(Boolean).join(" ")}">${t}</span>` : t;
+      continue;
+    }
+    for (const n of (sgr[1] || "0").split(";").map(Number)) {
+      if (n === 0) { fg = 0; bold = false; } else if (n === 1) bold = true; else if (n === 22) bold = false; else if (n === 39) fg = 0;
+      else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) fg = n;
+    } // ponytail: 256-color and RGB codes (38;5;n / 38;2;r;g;b) show uncolored, their numbers ignored as SGR
+  }
+  return out;
+}
+
+// Grep and Glob results as a list of matches, each opening its file (at the line, for content searches).
+function matchList(box, text) {
+  const rows = [], all = text.split("\n");
+  // content mode is "path:12:text" (or "12:text" in one file); its context lines use "-" and are left out
+  const content = all.some((l) => /^(.+?:)?\d+:/.test(l));
+  for (const l of all) {
+    if (rows.length >= 200) break;
+    if (!l.trim() || l === "--" || /^Found \d+ /.test(l) || /^\(Results are truncated/.test(l)) continue;
+    let m = null, file = l.replace(/:\d+$/, ""), line = "", rest = ""; // a bare path, or count mode's path:count
+    if (content) {
+      if ((m = l.match(/^(.+?):(\d+):(.*)$/))) [, file, line, rest] = m;
+      else if ((m = l.match(/^(\d+):(.*)$/)) && box.searchPath) { file = box.searchPath; [, line, rest] = m; }
+      else continue;
+    }
+    rows.push(h("div", { class: "match file-link", role: "button", tabindex: "0", "data-file": file, "data-line": m ? line : "", title: l },
+      h("span", { class: "file-name" }, base(file) + (m ? `:${line}` : "")), h("span", { class: "file-dir" }, m ? rest.trim() : dir(file))));
+  }
+  if (!rows.length) return false;
+  box.classList.add("has-body");
+  $(".step-body", box).append(h("div", { class: "codeblock matches" },
+    h("div", { class: "codebar" }, h("span", {}, "Results"), h("button", { class: "icon-btn copy-code", title: "Copy" }, icon("copy"))),
+    h("div", { class: "match-list" }, rows), h("pre", { class: "hidden" }, h("code", {}, text)))); // the copy button copies the raw text
+  return true;
+}
+
+// An edit step folds out to its diff: syntax-colored, the changed words marked, and a click opens it in VS Code.
+function diffBlock(box, m) {
+  box.stepEdit = { id: m.id, ...m.edit }; // for the reply's "Changed N files" line
+  box.stepStats = m.diff;
+  const undo = h("button", { class: "icon-btn undo-step", title: "Undo just this step: put the file back as it was before it, keeping later edits",
+    onclick: () => send({ type: "undoStep", id: m.id, edit: m.edit }) }, icon("discard"), h("span", {}, "Undo"));
+  box.classList.add("has-body");
+  $(".step-body", box).replaceChildren(diffView(m.rows, m.edit.input.file_path || "", () => send({ type: "stepDiff", id: m.id, edit: m.edit }), undo));
+}
+
+function diffView(list, file, open, ...buttons) {
+  const lang = file.split(".").pop();
+  const rows = list.map((r, i) => {
+    if (r.k === "…") return h("div", { class: "dl gap" }, h("span", { class: "sign" }, "⋯"), h("span", {}, r.t));
+    // a removed line right before an added one: mark just the part that changed
+    const pair = r.k === "-" ? list[i + 1]?.k === "+" && list[i + 2]?.k !== "+" && list[i + 1] : r.k === "+" && list[i - 1]?.k === "-" && list[i - 2]?.k !== "-" && list[i - 1];
+    const code = h("span", { class: "dt" });
+    code.innerHTML = pair ? wordDiff(r.t, pair.t, lang) : highlight(r.t, lang) || " ";
+    return h("div", { class: `dl ${r.k === "+" ? "add" : r.k === "-" ? "del" : "ctx"}` }, h("span", { class: "sign" }, r.k), code);
+  });
+  return h("div", { class: "codeblock diffblock" },
+    h("div", { class: "codebar" }, h("span", { class: "grow" }, "Changes"), buttons,
+      h("button", { class: "icon-btn", title: "Open the diff in VS Code", onclick: open }, icon("diff"), h("span", {}, "Open in VS Code"))),
+    h("div", { class: "diff-rows", title: "Click to open the diff in VS Code", onclick: () => !getSelection().toString() && open() }, rows));
+}
+
+// `a` with what differs from `b` (all but their common start and end) wrapped in <mark>.
+function wordDiff(a, b, lang) {
+  let s = 0, e = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+  return highlight(a.slice(0, s), lang) + (a.length - e > s ? `<mark>${highlight(a.slice(s, a.length - e), lang)}</mark>` : "") + highlight(a.slice(a.length - e), lang);
 }
 
 function stepResult(m) {
   const el = stepRow(m.id);
   if (!el) return;
-  if (m.output) ioBlock(el.parentElement, m.isError ? "Error" : "Output", m.output, m.isError ? "io-error" : "");
+  if (m.rows?.length && m.edit) diffBlock(el.parentElement, m);
+  else if (m.output && el.parentElement.search && !m.isError && matchList(el.parentElement, m.output));
+  else if (m.output) ioBlock(el.parentElement, m.isError ? "Error" : "Output", m.output, m.isError ? "io-error" : "");
   if (m.images?.length) { // e.g. Claude reading a screenshot: show it, click to open in VS Code
     const box = el.parentElement;
     box.classList.add("has-body");
@@ -619,6 +704,8 @@ function stepResult(m) {
   const meta = $(".meta", el);
   if (m.diff) meta.replaceChildren(h("span", { class: "add" }, `+${m.diff.added}`), h("span", { class: "del" }, `-${m.diff.removed}`));
   else if (m.summary) meta.textContent = m.summary;
+  const took = (m.at || Date.now()) - el.dataset.start;
+  if (took >= 1000) meta.append(h("span", { class: "muted took" }, `${meta.textContent ? " · " : ""}${took < 60000 ? (took / 1000).toFixed(1) + "s" : elapsed(Date.now() - took)}`));
   if (m.isError && m.error) el.title = m.error;
 }
 
@@ -679,6 +766,28 @@ function finalize(ms) {
     while (first?.previousElementSibling?.matches(".notice") && first.matches(".notice")) first = first.previousElementSibling;
     first?.matches(".notice") ? first.before(actions) : t.body.append(actions);
   }
+  turnChanges(t);
+}
+
+// "Changed 3 files +40 -12" at the end of a reply that edited files; a click shows all of it in one diff.
+function turnChanges(t) {
+  const files = new Map();
+  for (const box of t.body.querySelectorAll(".step-box")) {
+    if (!box.stepEdit?.input?.file_path || box.querySelector(":scope > .step.undone")) continue;
+    const f = files.get(box.stepEdit.input.file_path) || { file: box.stepEdit.input.file_path, steps: [], added: 0, removed: 0 };
+    f.steps.push(box.stepEdit);
+    f.added += box.stepStats?.added || 0;
+    f.removed += box.stepStats?.removed || 0;
+    files.set(f.file, f);
+  }
+  if (!files.size) return;
+  const list = [...files.values()], add = list.reduce((n, f) => n + f.added, 0), del = list.reduce((n, f) => n + f.removed, 0);
+  const card = h("div", { class: "turn-changes", role: "button", tabindex: "0", title: "Show everything this reply changed in one diff",
+    onclick: () => send({ type: "turnDiff", checkpoint: t.payload?.checkpoint, files: list.map(({ file, steps }) => ({ file, steps })) }) },
+    icon("diff"), `Changed ${list.length} file${list.length === 1 ? "" : "s"}`, h("span", { class: "add" }, ` +${add}`), h("span", { class: "del" }, ` -${del}`),
+    h("span", { class: "muted ellipsis" }, " · " + list.map((f) => base(f.file)).join(", ")));
+  const actions = $(":scope > .msg-actions", t.body);
+  actions ? actions.before(card) : t.body.append(card);
 }
 
 function errorBox(text) {
@@ -733,9 +842,10 @@ function permissionCard(m) {
       h("button", { class: "primary", onclick: () => decide(true, {}, "Applied") }, icon("check"), "Apply"),
       !m.risk && h("button", { title: "Apply this and every later edit in this chat without asking", onclick: () => decide(true, { allEdits: true }, "Applied · later edits in this chat apply without asking") }, icon("check-all"), "Allow all edits in this chat"),
       h("button", { onclick: () => decide(false) }, "Reject"),
-      m.hasDiff && h("button", { class: "ghost", onclick: () => send({ type: "showProposed", id: m.id }) }, icon("diff"), "View diff"));
+      m.hasDiff && !m.rows?.length && h("button", { class: "ghost", onclick: () => send({ type: "showProposed", id: m.id }) }, icon("diff"), "View diff"));
     card = h("div", { class: "permission" }, h("div", { class: "card-title" }, icon("edit"), `${m.name} `, h("span", { class: "chip file-link", "data-file": m.detail, title: m.detail }, icon("file"), base(m.detail)), "?"),
-      m.risk && h("div", { class: "risk" }, icon("warning"), m.risk), actions);
+      m.risk && h("div", { class: "risk" }, icon("warning"), m.risk),
+      m.rows?.length && diffView(m.rows, m.detail, () => send({ type: "showProposed", id: m.id })), actions);
   } else {
     append(actions, 
       h("button", { class: "primary", onclick: () => decide(true) }, "Allow"),
@@ -787,10 +897,10 @@ function renderTasks() {
 }
 setInterval(() => tasksPanel.querySelectorAll("[data-start]").forEach((e) => (e.textContent = elapsed(+e.dataset.start))), 1000);
 
-function revealStep(id) {
-  const row = stepRow(id);
+const revealStep = (id) => reveal(stepRow(id));
+function reveal(row) {
   if (!row) return;
-  for (let d = row.parentElement.parentElement.closest("details"); d; d = d.parentElement.closest("details")) d.open = true; // folded groups around it
+  for (let d = row.parentElement.closest("details"); d; d = d.parentElement.closest("details")) if (!d.firstElementChild.contains(row)) d.open = true; // folded groups around it
   row.scrollIntoView({ block: "center", behavior: "smooth" });
   row.classList.add("flash");
   setTimeout(() => row.classList.remove("flash"), 1200);
@@ -821,6 +931,8 @@ const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)}
 // A binary file (an image, say) has no lines to count, so it shows its size instead.
 const binaryStats = (f) => f.created ? `new · ${size(f.after)}` : f.deleted ? `deleted · ${size(f.before)}` : `${size(f.before)} → ${size(f.after)}`;
 
+const lastEditStep = (file) => [...(shown?.el.querySelectorAll(".step-box") || [])].filter((b) => b.stepEdit?.input.file_path === file).pop()?.firstElementChild;
+
 function renderChanges() {
   const files = shown?.changes || [];
   changesPanel.classList.toggle("hidden", !files.length);
@@ -839,6 +951,7 @@ function renderChanges() {
       f.binary ? h("span", { class: "file-stats muted" }, binaryStats(f))
         : h("span", { class: "file-stats" }, h("span", { class: "add" }, `+${f.added}`), h("span", { class: "del" }, `-${f.removed}`)),
       h("span", { class: "row-actions" },
+        lastEditStep(f.file) && h("button", { class: "icon-btn", title: "Show the last step that changed it", onclick: (e) => { e.stopPropagation(); reveal(lastEditStep(f.file)); } }, icon("go-to-file")),
         !(f.binary && (f.created || f.deleted)) && h("button", { class: "icon-btn", title: "View diff", onclick: (e) => { e.stopPropagation(); send({ type: "diffFile", file: f.file }); } }, icon("diff")),
         h("button", { class: "icon-btn", title: "Keep", onclick: (e) => { e.stopPropagation(); send({ type: "keep", file: f.file }); } }, icon("check")),
         h("button", { class: "icon-btn", title: "Undo", onclick: (e) => { e.stopPropagation(); send({ type: "undo", file: f.file }); } }, icon("discard"))))))));
@@ -988,7 +1101,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("click", (e) => {
   const link = e.target.closest(".file-link");
   if (link) e.preventDefault(); // don't also fold a step open
-  if (link) return send({ type: "open", file: link.dataset.file, line: Number(link.dataset.line) || undefined });
+  if (link) return send({ type: "open", file: link.dataset.file, line: Number(link.dataset.line) || undefined, end: Number(link.dataset.end) || undefined });
   const copy = e.target.closest(".copy-code");
   if (copy) {
     send({ type: "copy", text: copy.closest(".codeblock").querySelector("code").textContent });
@@ -1054,13 +1167,28 @@ setInterval(() => { if (!usageCard.classList.contains("hidden")) renderUsage(); 
 function makeChat(key) {
   const el = h("div", { class: "scroll hidden", role: "log", "aria-label": "Conversation" });
   el.addEventListener("scroll", flashThumb, { passive: true });
+  el.addEventListener("scroll", () => el.scrollTop < 400 && loadOlder(c), { passive: true });
   composer.before(el);
   const c = { key, el, turn: null, redo: null, busy: false, todos: [], tasks: [], queue: [], context: null, title: "", unread: false, attention: false,
     changes: [], draft: { text: "", items: [], images: [], useActive: true } }; // its own files changed and its own unsent message
   chats.set(key, c);
   paneResize.observe(el);
+  new MutationObserver(() => c === shown && drawSoon()).observe(el, { childList: true, subtree: true });
   renderTabs();
   return c;
+}
+
+// A reopened chat shows its latest messages first; earlier pages come in as the user scrolls up.
+function loadOlder(c, all) {
+  if (!c.more || c.olderPending) return;
+  c.olderPending = true;
+  c.el.prepend(h("div", { class: "older-loading muted" }, icon("loading", "spin"), "Loading earlier messages…"));
+  vscode.postMessage({ chat: c.key, type: "loadOlder", all });
+}
+
+// Not enough on screen to scroll up yet: fetch the next page now.
+function fillOlder(c) {
+  if (c === shown && c.el.scrollHeight <= c.el.clientHeight + 400) loadOlder(c);
 }
 
 // Point the conversation functions (turn, redo, busy, todos, scroll) at chat `c`.
@@ -1126,6 +1254,9 @@ function showChat(key, tell) {
   renderChanges();
   if (caughtUp) scrollDown(true);
   placeThumb();
+  closeFind();
+  drawSoon();
+  fillOlder(c);
   if (tell) send({ type: "switchChat" });
 }
 
@@ -1194,13 +1325,21 @@ function handle(m) {
       return;
     }
     case "insertText": input.setRangeText(m.text, input.selectionStart, input.selectionEnd, "end"); input.focus(); return autosize();
-    case "sessions": S.sessions = m.items; return renderEmpty();
+    case "sessions": S.sessions = m.items; S.pinned = m.pinned || []; return renderEmpty();
     case "text": return addText(m.text);
     case "textStart": if (turn) turn.text = null; return; // a new text block is a new paragraph, not a continuation
     case "thinkingStart": return addThinking();
     case "thinking": return addThinkingText(m.text);
     case "tool": return addStep(m);
     case "toolResult": return stepResult(m);
+    case "stepUndone": {
+      const row = stepRow(m.id), btn = row && $(".undo-step", row.parentElement);
+      if (!row) return;
+      row.classList.add("undone");
+      $(".meta", row).prepend(h("span", { class: "muted" }, "undone · "));
+      if (btn) { btn.disabled = true; btn.replaceChildren(icon("check"), h("span", {}, "Undone")); }
+      return;
+    }
     case "todos": S.todos = m.todos; return renderTodos();
     case "suggestion": if (cur.busy) return; cur.suggestion = m.text; return cur === shown && setPlaceholder();
     case "changes": cur.changes = m.files; return cur === shown && renderChanges();
@@ -1269,12 +1408,33 @@ function handle(m) {
       for (const item of m.items) handle(item);
       finalize();
       cur.loading = false;
+      cur.more = m.more;
       scroll.querySelector(".loading-chat")?.remove();
       showEmpty(!scroll.querySelector(".turn"));
-      return scrollDown(true);
+      scrollDown(true);
+      return fillOlder(cur);
+    case "older": { // a page further up: rendered apart, then slipped in on top without moving what's on screen
+      const pane = scroll, last = turn, fromBottom = pane.scrollHeight - pane.scrollTop;
+      scroll = h("div");
+      turn = null;
+      try { for (const item of m.items) if (item.type !== "todos") handle(item); finalize(); } // its todo lists are long done
+      finally {
+        const page = scroll;
+        scroll = pane;
+        turn = last;
+        pane.querySelector(".older-loading")?.remove();
+        pane.prepend(...page.children);
+      }
+      pane.scrollTop = pane.scrollHeight - fromBottom;
+      cur.more = m.more;
+      cur.olderPending = false;
+      if (cur === shown && !findBar.classList.contains("hidden")) { runFind(true); loadOlder(cur, true); } // find searches the whole chat
+      return fillOlder(cur);
+    }
     case "tabState": return vscode.setState({ ...vscode.getState(), sessionId: m.sessionId }); // an editor tab reopens this chat after a reload
     case "clear":
       cur.loading = false;
+      cur.more = cur.olderPending = false;
       redo = null;
       turn = null;
       scroll.replaceChildren(...(cur === shown ? [empty] : []));
@@ -1321,6 +1481,116 @@ thumb.addEventListener("mousedown", (e) => {
   window.addEventListener("mousemove", move);
   window.addEventListener("mouseup", up);
 });
+
+// ---------- find in chat (Ctrl+F) ----------
+const findInput = h("input", { type: "text", placeholder: "Find in chat", "aria-label": "Find in chat" });
+const findCount = h("span", { class: "muted small find-count" });
+const findBar = h("div", { class: "find-bar hidden", role: "search" }, icon("search", "muted"), findInput, findCount,
+  h("button", { class: "icon-btn", title: "Previous match (Shift+Enter)", onclick: () => stepFind(-1) }, icon("arrow-up")),
+  h("button", { class: "icon-btn", title: "Next match (Enter)", onclick: () => stepFind(1) }, icon("arrow-down")),
+  h("button", { class: "icon-btn", title: "Close (Escape)", onclick: () => closeFind() }, icon("close")));
+document.body.append(findBar);
+let hits = [], hitAt = -1;
+
+function openFind() {
+  const r = shown.el.getBoundingClientRect();
+  findBar.style.top = r.top + 6 + "px";
+  findBar.style.right = window.innerWidth - r.right + 14 + "px";
+  findBar.classList.remove("hidden");
+  const sel = getSelection().toString().trim();
+  if (sel && !sel.includes("\n")) findInput.value = sel;
+  findInput.select();
+  findInput.focus();
+  loadOlder(shown, true); // the pages not loaded yet; the search reruns as they arrive
+  runFind();
+}
+
+function clearHits() {
+  for (const m of hits) if (m.isConnected) { const p = m.parentNode; m.replaceWith(...m.childNodes); p.normalize(); }
+  hits = [];
+  hitAt = -1;
+}
+
+function closeFind() {
+  if (findBar.classList.contains("hidden")) return;
+  clearHits();
+  findBar.classList.add("hidden");
+}
+
+// Mark every match in the chat on screen. ponytail: a match split across highlight spans (code) isn't found.
+function runFind(keep) {
+  const before = hits.length - hitAt; // keep: stay on the same match as earlier messages come in on top
+  clearHits();
+  const q = findInput.value.toLowerCase();
+  if (q) {
+    const walk = document.createTreeWalker(shown.el, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => n.parentElement.closest(".hidden, .older-loading") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    const nodes = [];
+    while (walk.nextNode()) nodes.push(walk.currentNode);
+    for (let node of nodes) {
+      for (let at = node.data.toLowerCase().indexOf(q); at >= 0; at = node.data.toLowerCase().indexOf(q)) {
+        const hit = node.splitText(at);
+        node = hit.splitText(q.length);
+        const mark = h("mark", { class: "find-hit" });
+        hit.replaceWith(mark);
+        mark.append(hit);
+        hits.push(mark);
+      }
+    }
+  }
+  hitAt = !hits.length ? -1 : keep && before <= hits.length ? hits.length - before : hits.length - 1; // the latest match first
+  showHit(!keep);
+}
+
+function stepFind(d) {
+  if (!hits.length) return;
+  hitAt = (hitAt + d + hits.length) % hits.length;
+  showHit(true);
+}
+
+function showHit(jump) {
+  hits.forEach((m, i) => m.classList.toggle("current", i === hitAt));
+  findCount.textContent = findInput.value ? `${hits.length ? hitAt + 1 : 0}/${hits.length}` : "";
+  if (jump && hits[hitAt]) reveal(hits[hitAt]);
+}
+
+let findTimer;
+findInput.addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(() => runFind(), 150); });
+findInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  if (e.key === "Escape") { e.stopPropagation(); closeFind(); input.focus(); }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
+});
+
+// ---------- minimap: ticks beside the scrollbar for messages, edits, errors and questions; a click jumps there ----------
+const minimap = h("div", { class: "minimap", "aria-hidden": "true" });
+document.body.append(minimap);
+let mapTimer;
+function drawSoon() { clearTimeout(mapTimer); mapTimer = setTimeout(drawMinimap, 250); }
+function drawMinimap() {
+  const pane = shown?.el;
+  if (!pane || pane.scrollHeight <= pane.clientHeight + 1) return minimap.replaceChildren();
+  const r = pane.getBoundingClientRect();
+  Object.assign(minimap.style, { top: r.top + "px", left: r.right - 4 + "px", height: r.height + "px" });
+  const ticks = [];
+  const tick = (el, kind, title) => {
+    let at = el; // inside folded steps: where its outermost folded line is
+    for (let d = el.parentElement?.closest("details"); d; d = d.parentElement.closest("details")) if (!d.open && !d.firstElementChild.contains(el)) at = d.firstElementChild;
+    const y = at.getBoundingClientRect().top - r.top + pane.scrollTop;
+    const t = h("div", { class: `tick ${kind}`, title, onclick: () => reveal(el) });
+    t.style.top = (y / pane.scrollHeight) * r.height + "px";
+    ticks.push(t);
+  };
+  pane.querySelectorAll(".user-msg").forEach((e) => tick(e, "user", e.textContent.trim().slice(0, 80)));
+  pane.querySelectorAll(".step-box").forEach((b) => b.stepEdit && tick(b.firstElementChild, "edit", b.firstElementChild.textContent.trim()));
+  pane.querySelectorAll(".step.error, .error-box").forEach((e) => tick(e, "error", e.textContent.trim().slice(0, 80)));
+  pane.querySelectorAll(".permission").forEach((e) => tick(e, "ask", $(".card-title", e)?.textContent.trim() || "Approval"));
+  minimap.replaceChildren(...ticks);
+}
+window.addEventListener("resize", drawSoon);
+document.addEventListener("toggle", drawSoon, true); // folding moves everything below
 
 // ---------- boot ----------
 showChat(document.body.dataset.chat || "c1"); // the chat this view opens on; "chats" on ready brings any others

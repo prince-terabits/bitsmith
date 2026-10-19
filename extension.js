@@ -129,6 +129,7 @@ class Chat {
     this.busy = false;
     this.pending = new Map(); // permission request id -> { req, diff }
     this.tools = new Map(); // tool_use id -> { name, input }
+    this.befores = new Map(); // Write tool_use id -> the file's text before it (null: new file), to undo or diff just that step
     this.bashMarks = new Map();
     this.touched = new Set(); // files this chat changed: its own "files changed" list, Keep all and Undo all // Bash tool_use id -> git snapshots of the repos it may touch, taken just before it ran
     this.checkpoints = []; // one per live message: { id, sessionId, resumeAt, snaps: Map(file -> text | null) }
@@ -223,6 +224,7 @@ class Chat {
     this.queue = [];
     this.lastUuid = null;
     this.title = "";
+    this.older = null;
     this.post({ type: "clear" });
     this.setContext(0);
     this.p.chatChanged(this);
@@ -424,6 +426,7 @@ class Chat {
   toolStart(b, parent) {
     this.tools.set(b.id, { name: b.name, input: b.input });
     if (EDIT_TOOLS.has(b.name)) this.snapshot(b.input.file_path || b.input.notebook_path);
+    if (b.name === "Write" && b.input.file_path) this.befores.set(b.id, readText(b.input.file_path)); // it hasn't run yet
     if (b.name === "TodoWrite" && !parent) this.post({ type: "todos", todos: b.input.todos || [] });
     if (HIDDEN_TOOLS.has(b.name)) return;
     this.post({ type: "tool", id: b.id, parent, ...describeTool(b.name, b.input, (f) => this.rel(f)) });
@@ -607,7 +610,9 @@ class Chat {
     }
     if (EDIT_TOOLS.has(req.tool_name)) {
       this.snapshot(file);
-      const risk = this.p.editRisk(file); // "commands ask first" has to hold for edits that run commands, whatever the policy
+      const dirty = vscode.workspace.textDocuments?.some((d) => d.isDirty && d.uri.scheme === "file" && norm(d.uri.fsPath) === norm(file));
+      const risk = this.p.editRisk(file) // "commands ask first" has to hold for edits that run commands, whatever the policy
+        || (dirty ? "You have unsaved changes in this file. Claude edits the saved copy, so it will clash with them; save or revert first" : "");
       if (!risk && (policy !== "ask" || this.allowEdits)) return allow();
       let diff = null;
       const after = applyEdit(req.tool_name, req.input);
@@ -617,10 +622,11 @@ class Chat {
       }
       this.pending.set(id, { req, diff });
       this.p.notify(this, "needs your approval");
+      const rows = diffRows(req.tool_name, req.input); // shown on the card itself
       this.post({ type: "permission", id, kind: "edit", name: req.tool_name, hasDiff: !!diff,
         detail: risk && !this.p.inFolder(file) ? file : this.rel(file), // outside the folder, show where it really goes
-        risk: risk || undefined });
-      if (diff && this.p.active === this) this.showProposed(id);
+        risk: risk || undefined, rows });
+      if (diff && !rows.length && this.p.active === this) this.showProposed(id);
       return;
     }
     if (policy === "bypass") return allow();
@@ -709,6 +715,7 @@ class Chat {
   // Async: a long chat takes a while to read and render, so the loading screen goes out first.
   async loadSession(id) {
     this.shutdown();
+    this.older = null;
     this.sessionId = id;
     this.resumeAt = null;
     this.allowEdits = false; // "Allow all edits" was for the conversation that was here
@@ -730,13 +737,64 @@ class Chat {
     for (const it of items) {
       const cp = it.type === "user" && saved.get(it.key);
       if (cp) { cp.id = `saved-${++n}`; it.checkpoint = cp.id; this.checkpoints.push(cp); }
+      if ("before" in it) { this.befores.set(it.id, it.before); delete it.before; } // stays here, not in the webview
     }
     this.userCount = 0; // messages already sent after the last reply
     for (let i = items.length - 1; i >= 0 && items[i].type === "user"; i--) this.userCount++;
-    this.post({ type: "replay", items });
+    const cut = pageStart(items, items.length, 8); // the latest messages now; older ones as the user scrolls up
+    this.older = items.slice(0, cut);
+    this.post({ type: "replay", items: items.slice(cut), more: cut > 0 });
     const last = lastUsage(file);
     if (last) this.setContext(last.used, last.model);
     if (this.p.active === this) this.ensure(); // restored background tabs start their process when shown
+  }
+
+  // The next page up of a reopened chat.
+  loadOlder(all) {
+    if (!this.older?.length) return;
+    const cut = all ? 0 : pageStart(this.older, this.older.length, 10); // all: find in chat searches the whole chat
+    this.post({ type: "older", items: this.older.slice(cut), more: cut > 0 });
+    this.older = this.older.slice(0, cut);
+  }
+
+  // ---- step changes ----
+
+  // Put a file back to how it was before one edit step, leaving later edits alone.
+  async undoStep({ id, edit }) {
+    const file = edit?.input?.file_path;
+    if (!file) return;
+    const doc = vscode.workspace.textDocuments.find((d) => d.uri.scheme === "file" && norm(d.uri.fsPath) === norm(file));
+    if (doc?.isDirty) return vscode.window.showWarningMessage(`${path.basename(file)} has unsaved changes. Save or revert them first.`);
+    const before = stepBefore([{ ...edit, before: this.befores.get(id) }], readText(file));
+    if (before === undefined) return vscode.window.showInformationMessage(`Can't undo just this step: ${path.basename(file)} has changed since, or the edit can't be told apart. Undo the whole file from the changes list instead.`);
+    if (before === null) fs.rmSync(file, { force: true }); // the step created it
+    else if (doc) await this.edits.replaceText(doc, before);
+    else fs.writeFileSync(file, before);
+    this.edits.refresh();
+    this.post({ type: "stepUndone", id });
+  }
+
+  // Everything one reply changed, in one multi-file diff: each file as it was before the reply against how it was after.
+  turnDiff({ checkpoint, files }) {
+    const at = this.checkpoints.findIndex((c) => c.id === checkpoint);
+    const doc = (file, side, text) => {
+      const uri = vscode.Uri.from({ scheme: PROPOSED, path: file, query: `${side}-${Math.random().toString(36).slice(2)}` });
+      proposed.set(uri.toString(), text);
+      return uri;
+    };
+    const res = [];
+    for (const { file, steps } of files || []) {
+      const later = at < 0 ? undefined : this.checkpoints.slice(at + 1).find((c) => c.snaps.has(file));
+      const after = later ? later.snaps.get(file) : readText(file); // a later reply changed it again: stop where it took over
+      const before = at >= 0 && this.checkpoints[at].snaps.has(file) ? this.checkpoints[at].snaps.get(file)
+        : stepBefore(steps.map((s) => ({ ...s, before: this.befores.get(s.id) })), after);
+      if (Buffer.isBuffer(before) || Buffer.isBuffer(after) || before === undefined) continue; // binary, or can't be worked out
+      res.push([vscode.Uri.file(file), doc(file, "before", before ?? ""), later ? doc(file, "after", after ?? "") : vscode.Uri.file(file)]);
+    }
+    if (!res.length) return vscode.window.showInformationMessage("Can't show this reply's changes: the files have changed too much since.");
+    if (res.length === 1) return vscode.commands.executeCommand("vscode.diff", res[0][1], res[0][2], `${path.basename(res[0][0].fsPath)} (this reply's changes)`, { preview: true });
+    vscode.commands.executeCommand("vscode.changes", "Bitsmith: this reply's changes", res)
+      .then(undefined, () => vscode.commands.executeCommand("vscode.diff", res[0][1], res[0][2])); // older VS Code: the first file
   }
 
   updateTitle() {
@@ -965,7 +1023,7 @@ class ChatProvider {
     c.panel.webview.postMessage({ type: "usage", usage: this.usage, plan: this.plan });
     if (this.info) c.panel.webview.postMessage({ type: "init", ...this.info });
     c.panel.webview.postMessage({ type: "chats", chats: [{ key: c.key, title: c.title }], active: c.key });
-    if (this.folder) c.panel.webview.postMessage({ type: "sessions", items: this.sessions(6).map(({ id, title, time }) => ({ id, title, time })) });
+    if (this.folder) c.panel.webview.postMessage(this.sessionsMsg());
     this.postActiveFile();
     this.edits.refresh();
     if (c.sessionId) c.loadSession(c.sessionId);
@@ -1046,7 +1104,7 @@ class ChatProvider {
       case "exportChat": return this.exportChat(c);
       case "send": return c.send(m);
       case "stop": return c.interrupt();
-      case "open": return this.openPath(c, m.file, m.line);
+      case "open": return this.openPath(c, m.file, m.line, m.end);
       case "openImage": return openImage(m.mediaType, m.data);
       case "permission": return c.answer(m);
       case "editPlan": return c.editPlan(m.id);
@@ -1058,10 +1116,15 @@ class ChatProvider {
       case "keep": return this.edits.keep(m.file || [...c.touched]); // no file: everything this chat changed
       case "undo": return this.edits.undo(m.file || [...c.touched]);
       case "diffFile": return this.edits.showDiff(m.file);
+      case "loadOlder": return c.loadOlder(m.all);
+      case "stepDiff": return m.edit && showStepDiff({ ...m.edit, before: c.befores.get(m.id) });
+      case "undoStep": return c.undoStep(m);
+      case "turnDiff": return c.turnDiff(m);
       case "copy": return vscode.env.clipboard.writeText(m.text);
       case "history": return this.history();
       case "loadSession": return this.openSession(m.id);
       case "deleteSession": return this.deleteSession(m.id);
+      case "pinSession": return this.togglePin(m.id);
       case "newChat": return this.newChat();
       case "switchChat": return this.chats.has(m.chat) && this.switchTo(c, false);
       case "closeChat": return this.closeChat(c);
@@ -1093,21 +1156,21 @@ class ChatProvider {
 
   // A file named in a reply. Replies often give a path relative to where Claude was working, or just a name,
   // so when it isn't at the folder root, look for it: files this chat touched first, then shortest path.
-  async openPath(c, file, line) {
+  async openPath(c, file, line, end) {
     if (!file) return;
     const direct = this.abs(file.replace(/^~(?=\/|$)/, os.homedir()));
-    if (fs.existsSync(direct)) return openFile(direct, line);
+    if (fs.existsSync(direct)) return openFile(direct, line, end);
     const rel = file.replace(/^(\.{1,2}\/)+/, "");
     const found = (await vscode.workspace.findFiles(`**/${rel}`, EXCLUDE, 50)).map((u) => u.fsPath);
     if (!found.length) {
       const near = this.mentionedPath(c, rel);
-      return near ? openFile(near, line) : vscode.window.showInformationMessage(`Bitsmith couldn't find ${file} in this workspace.`);
+      return near ? openFile(near, line, end) : vscode.window.showInformationMessage(`Bitsmith couldn't find ${file} in this workspace.`);
     }
     const touched = new Set([...(c?.tools.values() || [])].map((t) => t.input?.file_path).filter(Boolean));
     found.sort((a, b) => touched.has(b) - touched.has(a) || a.length - b.length);
-    if (found.length === 1 || touched.has(found[0])) return openFile(found[0], line);
+    if (found.length === 1 || touched.has(found[0])) return openFile(found[0], line, end);
     const pick = await vscode.window.showQuickPick(found.map((f) => ({ label: path.basename(f), description: this.rel(f), f })), { placeHolder: `Several files match ${file}` });
-    if (pick) openFile(pick.f, line);
+    if (pick) openFile(pick.f, line, end);
   }
 
   onInit(r) {
@@ -1394,8 +1457,29 @@ class ChatProvider {
       .filter((s) => s.title);
   }
 
+  // Pinned chats (up to 5 per folder) lead the empty screen; Recent lists the rest.
+  sessionsMsg() {
+    const pick = ({ id, title, time }) => ({ id, title, time });
+    const pinned = this.pins().map((id) => this.session(id)).filter((s) => s?.title).map(pick);
+    const ids = new Set(pinned.map((s) => s.id));
+    return { type: "sessions", items: this.sessions(6 + ids.size).filter((s) => !ids.has(s.id)).map(pick), pinned };
+  }
+
+  pins() { return this.ws.get("pinnedChats") || []; }
+
+  togglePin(id) {
+    if (!/^[0-9a-f-]{36}$/i.test(id || "")) return;
+    const pins = this.pins().filter((p) => p !== id && this.session(p)); // deleted chats drop out
+    if (!this.pins().includes(id)) {
+      if (pins.length >= 5) return void vscode.window.showInformationMessage("Up to 5 chats can be pinned. Unpin one first.");
+      pins.unshift(id);
+    }
+    this.ws.update("pinnedChats", pins);
+    this.postSessions();
+  }
+
   postSessions() {
-    if (this.folder) this.post({ type: "sessions", items: this.sessions(6).map(({ id, title, time }) => ({ id, title, time })) });
+    if (this.folder) this.post(this.sessionsMsg());
   }
 
   async history(tab = this.current().panel ? this.current() : null) {
@@ -1403,7 +1487,10 @@ class ChatProvider {
     const rename = { iconPath: new vscode.ThemeIcon("edit"), tooltip: "Rename chat" };
     const qp = vscode.window.createQuickPick();
     let recent = [];
-    const item = (s, found) => ({ label: s.title, description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), id: s.id, buttons: [rename, trash], alwaysShow: found });
+    const pin = { iconPath: new vscode.ThemeIcon("pin"), tooltip: "Pin to the empty screen" };
+    const unpin = { iconPath: new vscode.ThemeIcon("pinned"), tooltip: "Unpin" };
+    const item = (s, found) => ({ label: s.title, description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), id: s.id,
+      buttons: [this.pins().includes(s.id) ? unpin : pin, rename, trash], alwaysShow: found });
     const load = () => {
       recent = this.sessions(60);
       qp.items = recent.map((s) => item(s));
@@ -1430,6 +1517,10 @@ class ChatProvider {
     });
     qp.onDidAccept(() => { const pick = qp.selectedItems[0]; qp.hide(); if (pick) this.openSession(pick.id, tab); });
     qp.onDidTriggerItemButton(async ({ item: it, button }) => {
+      if (button === pin || button === unpin) {
+        this.togglePin(it.id);
+        return void (qp.items = qp.items.map((x) => x.id === it.id ? { ...x, buttons: [this.pins().includes(x.id) ? unpin : pin, rename, trash] } : x));
+      }
       qp.ignoreFocusOut = true; // keep the list open behind the dialog
       if (button === rename ? await this.renameSession(it.id) : await this.deleteSession(it.id)) load();
       qp.ignoreFocusOut = false;
@@ -1519,6 +1610,70 @@ function editStats(tool, input) {
   return tool === "NotebookEdit" ? null : total;
 }
 
+// A step's change as rows for the panel: each hunk with 2 lines of context; k is "+", "-", " ", or "…" for a gap.
+function diffRows(tool, input, max = 400) {
+  const rows = [];
+  if (tool === "Write") for (const t of lines(input.content || "")) rows.push({ k: "+", t });
+  for (const e of tool === "MultiEdit" ? input.edits || [] : tool === "Edit" ? [input] : []) {
+    const a = lines(e.old_string || ""), b = lines(e.new_string || ""), hunks = diffLines(a, b);
+    let at = 0;
+    if (rows.length && hunks.length) rows.push({ k: "…", t: "" });
+    hunks.forEach((h, n) => {
+      const from = Math.max(at, h.oStart - 2), to = Math.min(a.length, h.oEnd + 2, hunks[n + 1]?.oStart ?? Infinity);
+      if (from > at && n) rows.push({ k: "…", t: "" });
+      for (const t of a.slice(from, h.oStart)) rows.push({ k: " ", t });
+      for (const t of a.slice(h.oStart, h.oEnd)) rows.push({ k: "-", t });
+      for (const t of b.slice(h.nStart, h.nEnd)) rows.push({ k: "+", t });
+      for (const t of a.slice(h.oEnd, to)) rows.push({ k: " ", t });
+      at = to;
+    });
+  }
+  return rows.length > max ? [...rows.slice(0, max), { k: "…", t: `${rows.length - max} more lines` }] : rows;
+}
+
+function readText(file) {
+  try { return fs.readFileSync(file, "utf8"); } catch { return null; }
+}
+
+// A file's text before these edit steps (oldest first), worked back from its text now. null: it didn't exist yet;
+// undefined: can't tell, because the file has moved on or the edit is ambiguous to reverse. A Write step needs
+// `before`, what the file held when it ran.
+function stepBefore(steps, now) {
+  let text = now;
+  for (const { name, input, before } of [...steps].reverse()) {
+    if (typeof text !== "string") return undefined;
+    if (name === "Write") {
+      if (text !== input.content || before === undefined) return undefined;
+      text = before;
+      continue;
+    }
+    for (const e of [...(name === "MultiEdit" ? input.edits || [] : [input])].reverse()) {
+      const n = e.new_string || "", at = text.indexOf(n);
+      if (!n || at < 0 || (!e.replace_all && text.indexOf(n, at + 1) >= 0)) return undefined; // gone, or which copy was it?
+      text = e.replace_all ? text.split(n).join(e.old_string) : text.slice(0, at) + e.old_string + text.slice(at + n.length);
+    }
+  }
+  return text;
+}
+
+// One step's change in VS Code's diff editor. The current file with the step undone on the left, so later edits
+// don't show as part of it; when the file has moved on too far for that, just the replaced and new text.
+function showStepDiff(step) {
+  const { name, input } = step;
+  const file = input?.file_path;
+  if (!file) return;
+  const b = stepBefore([step], readText(file)), before = b === null ? "" : b ?? null; // a created file: empty on the left
+  const doc = (side, text) => {
+    const uri = vscode.Uri.from({ scheme: PROPOSED, path: file, query: `${side}-${Math.random().toString(36).slice(2)}` });
+    proposed.set(uri.toString(), text);
+    return uri;
+  };
+  const edits = name === "Write" ? [{ old_string: "", new_string: input.content }] : name === "MultiEdit" ? input.edits : [input];
+  const [left, right] = before != null ? [doc("before", before), vscode.Uri.file(file)]
+    : [doc("before", edits.map((e) => e.old_string).join("\n⋯\n")), doc("after", edits.map((e) => e.new_string).join("\n⋯\n"))];
+  vscode.commands.executeCommand("vscode.diff", left, right, `${path.basename(file)} (Bitsmith edit)`, { preview: true });
+}
+
 // What the file would look like after the edit; null if it can't be worked out.
 function applyEdit(tool, input) {
   if (tool === "Write") return input.content;
@@ -1578,6 +1733,8 @@ function resultInfo(name, text, isError) {
 
 function resultItem(tool, b, parent = null) {
   const diff = EDIT_TOOLS.has(tool.name) && !b.is_error ? editStats(tool.name, tool.input) : null;
+  if (diff) return { type: "toolResult", id: b.tool_use_id, parent, ...resultInfo(tool.name, resultText(b), false), diff,
+    rows: diffRows(tool.name, tool.input), edit: { name: tool.name, input: tool.input } }; // the change folds out; edit reopens it in VS Code
   // Images a tool returned (e.g. Read on a screenshot): shown in the step, a few and not huge
   const images = (Array.isArray(b.content) ? b.content : []).filter((c) => c.type === "image" && c.source?.type === "base64" && c.source.data.length < 6e6).slice(0, 4)
     .map(({ source: s }) => ({ mediaType: s.media_type, data: s.data, url: `data:${s.media_type};base64,${s.data}` }));
@@ -1677,7 +1834,7 @@ function describeTool(name, input = {}, rel = (f) => f) {
     case "Edit": case "MultiEdit": return { ...base, icon: "edit", title: "Edited", detail: rel(file) };
     case "Write": return { ...base, icon: "new-file", title: "Wrote", detail: rel(file) };
     case "NotebookEdit": return { ...base, icon: "notebook", title: "Edited notebook", detail: rel(file) };
-    case "Grep": return { ...base, icon: "search", title: "Searched for", detail: `"${short(input.pattern, 60)}"${input.path ? ` in ${rel(input.path)}` : ""}` };
+    case "Grep": return { ...base, searchPath: input.path, icon: "search", title: "Searched for", detail: `"${short(input.pattern, 60)}"${input.path ? ` in ${rel(input.path)}` : ""}` };
     case "Glob": return { ...base, icon: "file-directory", title: "Found files matching", detail: `"${short(input.pattern, 60)}"` };
     case "Bash": return { ...base, icon: "terminal", title: input.description ? short(input.description, 70) : "Ran", detail: short(input.command, 120), code: true };
     case "WebFetch": return { ...base, icon: "globe", title: "Fetched", detail: short(input.url, 90) };
@@ -1786,7 +1943,7 @@ function replay(file, rel) {
   const pasted = new Map();
   for (const e of all) (e.imagePasteIds || []).forEach((id, i) => { const img = imagesOf(e)[i]; if (img) pasted.set(id, img); });
   const subs = subagentFiles(file);
-  for (const e of activeBranch(all)) {
+  for (const e of withHistory(file, activeBranch(all))) {
     if (e.isSidechain) continue;
     const note = taskNotification(e);
     if (note) { items.push(note); continue; }
@@ -1804,7 +1961,10 @@ function replay(file, rel) {
     if (e.type === "user" && Array.isArray(e.message?.content)) {
       for (const b of e.message.content) {
         const tool = b.type === "tool_result" && tools.get(b.tool_use_id);
-        if (tool) items.push(resultItem(tool, b));
+        if (!tool) continue;
+        const it = { ...resultItem(tool, b), at: Date.parse(e.timestamp) || undefined };
+        if (tool.name === "Write" && it.edit && e.toolUseResult && "originalFile" in e.toolUseResult) it.before = e.toolUseResult.originalFile ?? null; // for undoing just this step
+        items.push(it);
       }
     } else if (e.type === "assistant") {
       if (e.uuid) { lastUuid = e.uuid; userCount = 0; }
@@ -1813,7 +1973,7 @@ function replay(file, rel) {
         if (b.type === "tool_use" && !HIDDEN_TOOLS.has(b.name)) {
           tools.set(b.id, b);
           if (b.name === "TodoWrite") items.push({ type: "todos", todos: b.input?.todos || [] });
-          items.push({ type: "tool", id: b.id, ...describeTool(b.name, b.input, rel) });
+          items.push({ type: "tool", id: b.id, at: Date.parse(e.timestamp) || undefined, ...describeTool(b.name, b.input, rel) });
           if (subs.has(b.id)) items.push(...subagentItems(subs, b.id, rel));
         }
       }
@@ -1850,11 +2010,11 @@ function subagentItems(subs, parent, rel) {
     for (const b of c) {
       if (e.type === "assistant" && b.type === "tool_use" && !HIDDEN_TOOLS.has(b.name)) {
         tools.set(b.id, b);
-        items.push({ type: "tool", id: b.id, parent, ...describeTool(b.name, b.input, rel) });
+        items.push({ type: "tool", id: b.id, parent, at: Date.parse(e.timestamp) || undefined, ...describeTool(b.name, b.input, rel) });
         if (subs.has(b.id)) items.push(...subagentItems(subs, b.id, rel));
       }
       const tool = e.type === "user" && b.type === "tool_result" && tools.get(b.tool_use_id);
-      if (tool) items.push(resultItem(tool, b, parent));
+      if (tool) items.push({ ...resultItem(tool, b, parent), at: Date.parse(e.timestamp) || undefined });
     }
   }
   return items;
@@ -1873,6 +2033,30 @@ function activeBranch(all) {
   let e = all.findLast((x) => x.uuid && !x.isSidechain && (x.type === "user" || x.type === "assistant"));
   for (; e && !keep.has(e.uuid); e = byId.get(e.parentUuid || e.logicalParentUuid)) keep.add(e.uuid);
   return all.filter((x) => keep.has(x.uuid));
+}
+
+// A fork of a compacted chat (a rewind, an edit, a background compaction) starts at the compaction: the CLI copies
+// nothing before it. That history is still in the session it was forked from, which the compaction summary names.
+function withHistory(file, branch, depth = 0) {
+  const first = branch.find((e) => e.uuid);
+  if (depth > 8 || first?.subtype !== "compact_boundary") return branch;
+  const c = branch.find((e) => e.isCompactSummary)?.message?.content;
+  const older = (typeof c === "string" ? c : Array.isArray(c) ? c.map((b) => b.text || "").join("") : "").match(/read the full transcript at: (\S+?\.jsonl)/)?.[1];
+  if (!older || path.resolve(older) === path.resolve(file)) return branch;
+  let all;
+  try { all = fs.readFileSync(older, "utf8").split("\n").map(parse).filter(Boolean); } catch { return branch; }
+  const at = all.findIndex((e) => e.uuid === first.uuid);
+  if (at < 0) return branch;
+  const own = new Set(branch.map((e) => e.uuid));
+  const before = activeBranch(all.slice(0, at)).filter((e) => !own.has(e.uuid)); // the messages the compaction kept are in both
+  return [...withHistory(older, before, depth + 1), ...branch];
+}
+
+// Where the last `n` messages before `end` start, so a page always holds whole turns.
+function pageStart(items, end, n) {
+  let i = end;
+  while (i > 0 && n > 0) if (items[--i].type === "user") n--;
+  return n ? 0 : i;
 }
 
 function lastAssistantUuid(file) {
@@ -1903,11 +2087,12 @@ function openImage(mediaType, data) {
   vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file), { preview: true });
 }
 
-function openFile(file, line) {
+// At a line, or with lines line..end selected (e.g. what a Read step read).
+function openFile(file, line, end) {
   if (!file || !fs.existsSync(file)) return;
   if (fs.statSync(file).isDirectory()) return vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(file));
   const opts = { preview: true };
-  if (line) opts.selection = new vscode.Range(line - 1, 0, line - 1, 0);
+  if (line) opts.selection = new vscode.Range(line - 1, 0, end > line ? end - 1 : line - 1, 0); // a Read of offset 425, limit 25 says "425-450": lines 425..449
   vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file), opts); // not showTextDocument: it refuses images and other binaries
 }
 
@@ -1965,6 +2150,13 @@ function activate(context) {
     vscode.commands.registerCommand("bitsmith.renameChat", () => { const id = provider.current().sessionId; id ? provider.renameSession(id) : vscode.window.showInformationMessage("Send a message first; then the chat can be named."); }),
     vscode.commands.registerCommand("bitsmith.deleteChat", () => { const id = provider.current().sessionId; id ? provider.deleteSession(id) : vscode.window.showInformationMessage("This chat hasn't been saved yet."); }),
     vscode.commands.registerCommand("bitsmith.newChatInEditor", () => provider.openTab()),
+    // The same session in the Claude Code CLI: run directly, no shell, so the id needs no quoting.
+    vscode.commands.registerCommand("bitsmith.openInTerminal", () => {
+      const c = provider.current();
+      if (!c.sessionId) return vscode.window.showInformationMessage("Send a message first; then the chat can be opened in the terminal.");
+      if (c.busy) return vscode.window.showWarningMessage("Stop the current reply first, so the terminal and Bitsmith don't both write to the chat.");
+      vscode.window.createTerminal({ name: `Claude: ${c.title || "chat"}`, cwd: provider.folder || undefined, shellPath: claudeBin(), shellArgs: ["--resume", c.sessionId], iconPath: new vscode.ThemeIcon("terminal") }).show();
+    }),
     vscode.window.registerWebviewPanelSerializer("bitsmith.chatTab", { deserializeWebviewPanel: async (panel, state) => {
       const id = state?.sessionId && fs.existsSync(path.join(provider.sessionDir(), state.sessionId + ".jsonl")) ? state.sessionId : null; // deleted meanwhile: an empty chat
       provider.openTab(id, panel);
@@ -1983,4 +2175,4 @@ function activate(context) {
   return provider;
 }
 
-module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit };
+module.exports = { activate, applyEdit, replay, sessionTitle, describeTool, parseUserText, editStats, lastUsage, searchSessions, chatMarkdown, git, riskyEdit, diffRows, pageStart, stepBefore };

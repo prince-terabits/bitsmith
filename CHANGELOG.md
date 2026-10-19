@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.17.0
+
+- **Open Chat in Terminal.** A terminal button in the chat's title bar (sidebar and editor tab) resumes the same chat
+  in the Claude Code CLI (`claude --resume <id>`) in a VS Code terminal. It asks you to stop a running reply first.
+
+## 1.16.0
+
+- **Pinned chats.** Pin up to 5 chats (per folder) from the pin button on a Recent chats row or in Chat History.
+  They show in a "Pinned" section above Recent chats on the empty screen; click the pin again to unpin.
+
+## 1.15.0
+
+- **Undo just one step.** An edit step's diff has an "Undo" button: it puts the file back to how it was before that
+  step only, keeping later edits. It refuses if the file has moved on so the step can't be reversed exactly, or if
+  the file has unsaved changes.
+- **Clickable search results.** Grep and Glob steps fold out to a list of matches; a click opens the file at that line.
+- **Step durations.** Steps that took a second or more show how long, e.g. "Ran tests · 14.2s".
+- **Colored command output.** ANSI colors and bold in Bash output show as in a terminal; other escape codes are stripped.
+- **"Changed N files" at the end of a reply.** A click opens everything that reply changed in one multi-file diff.
+- **Find in chat (Ctrl+F / Cmd+F).** Highlights every match, Enter / Shift+Enter to move between them, Escape to
+  close. Loads the rest of a paged chat so the search covers all of it.
+- **Minimap.** Small ticks beside the scrollbar mark your messages, edits, errors and approval cards; click to jump.
+- **Show the step that changed a file.** In "files changed", a new button scrolls to the last step that edited it.
+- **Edit approvals show the diff inline** on the card, instead of opening a diff editor.
+- **Unsaved-file warning.** An edit to a file with unsaved changes in VS Code always asks first, whatever the policy.
+
+## 1.14.0
+
+- **Paged chat loading.** A reopened chat renders only its last 8 messages; scrolling near the top (or a panel
+  too short to scroll) fetches 10 earlier ones at a time, slipped in above without moving what's on screen.
+
+## 1.13.2
+
+- **Fix: a compacted chat reopened showing only what came after the compaction.** When Claude Code forks a
+  compacted session (a rewind, an edited message, a background compaction), the new session starts at the
+  compaction and copies nothing before it. Replay now follows the compaction summary back to the session it came
+  from, recursively, so the whole conversation shows again from its first message.
+
+## 1.13.1
+
+- **Fix: clicking a Read step's file opened it at the top.** A chip like "extension.js 425-450" now opens the
+  file with exactly the lines Claude read selected, scrolled into view.
+
+## 1.13.0
+
+- **Edit and Write steps fold out to their diff.** Click the chevron on an "Edited" or "Wrote" row to see what that
+  step changed: the hunks with two lines of context, syntax colored, VS Code-style red/green rows, and the changed
+  part of each modified line marked. Works for past chats too.
+- **Open any step's change in VS Code.** "Open in VS Code" (or a click on the diff) opens VS Code's diff editor for
+  just that step. The left side is the current file with that step undone, so later edits don't get mixed in; the
+  right side is the real file, so you can edit it there. If the file has moved on too far, it diffs the replaced
+  text against the new text instead.
+
 ## 1.12.5
 
 - **Loading screen fills the panel.** The skeleton sat at the top with empty space below it. Now it fills the

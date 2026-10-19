@@ -68,6 +68,7 @@ button.small { padding: 1px 8px; min-height: 22px; font-size: 0.92em; }
 /* recent chats, just above the input */
 .recent { display: flex; flex-direction: column; gap: 1px; }
 .recent-head { display: flex; align-items: center; padding: 0 4px 4px 6px; }
+.recent-item + .recent-head { margin-top: 8px; } /* Recent chats under Pinned */
 .link-btn { background: none; color: var(--vscode-textLink-foreground); padding: 0 4px; min-height: 20px; font-size: 0.88em; }
 .link-btn:hover { background: none; text-decoration: underline; }
 .recent-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
@@ -143,6 +144,58 @@ button.small { padding: 1px 8px; min-height: 22px; font-size: 0.92em; }
 .step-body .codeblock.io pre { padding: 6px 10px; max-height: 260px; overflow: auto; }
 .step-body .codeblock.io code { white-space: pre-wrap; word-break: break-word; }
 .codeblock.io-error .codebar { color: var(--del); }
+/* an edit step's diff: VS Code-style tinted rows, the changed words a stronger tint */
+.diffblock .codebar .icon-btn { gap: 4px; padding: 2px 6px; font-size: 1em; }
+.diff-rows { max-height: 360px; overflow: auto; padding: 4px 0; cursor: pointer; font-family: var(--vscode-editor-font-family); font-size: 0.86em; line-height: 1.55; }
+.dl { display: flex; min-width: max-content; white-space: pre; padding-right: 10px; }
+.dl .sign { flex: none; width: 22px; text-align: center; color: var(--muted); user-select: none; }
+.dl.add { background: var(--vscode-diffEditor-insertedLineBackground, color-mix(in srgb, var(--add) 14%, transparent)); }
+.dl.del { background: var(--vscode-diffEditor-removedLineBackground, color-mix(in srgb, var(--del) 14%, transparent)); }
+.dl.add .sign { color: var(--add); }
+.dl.del .sign { color: var(--del); }
+.dl mark { color: inherit; border-radius: 2px; }
+.dl.add mark { background: var(--vscode-diffEditor-insertedTextBackground, color-mix(in srgb, var(--add) 35%, transparent)); }
+.dl.del mark { background: var(--vscode-diffEditor-removedTextBackground, color-mix(in srgb, var(--del) 35%, transparent)); }
+.dl.gap { color: var(--muted); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.codebar .grow { flex: 1; }
+.permission .diffblock { margin: 0; }
+.permission .diff-rows { max-height: 260px; }
+.step.undone .title, .step.undone .meta > span:not(.muted) { text-decoration: line-through; opacity: .7; }
+.step .took { font-variant-numeric: tabular-nums; }
+/* Grep and Glob results: one clickable line per match */
+.match-list { max-height: 260px; overflow: auto; padding: 2px 0; font-size: 0.92em; }
+.match { display: flex; gap: 8px; align-items: baseline; padding: 1px 10px; cursor: pointer; }
+.match:hover { background: var(--hover); }
+.match .file-dir { direction: ltr; font-family: var(--vscode-editor-font-family); }
+/* terminal colors in command output */
+.ansi-bold { font-weight: 700; }
+.ansi-30, .ansi-90 { color: var(--vscode-terminal-ansiBrightBlack, #666); }
+.ansi-31 { color: var(--vscode-terminal-ansiRed, #cd3131); } .ansi-91 { color: var(--vscode-terminal-ansiBrightRed, #f14c4c); }
+.ansi-32 { color: var(--vscode-terminal-ansiGreen, #0dbc79); } .ansi-92 { color: var(--vscode-terminal-ansiBrightGreen, #23d18b); }
+.ansi-33 { color: var(--vscode-terminal-ansiYellow, #e5e510); } .ansi-93 { color: var(--vscode-terminal-ansiBrightYellow, #f5f543); }
+.ansi-34 { color: var(--vscode-terminal-ansiBlue, #2472c8); } .ansi-94 { color: var(--vscode-terminal-ansiBrightBlue, #3b8eea); }
+.ansi-35 { color: var(--vscode-terminal-ansiMagenta, #bc3fbc); } .ansi-95 { color: var(--vscode-terminal-ansiBrightMagenta, #d670d6); }
+.ansi-36 { color: var(--vscode-terminal-ansiCyan, #11a8cd); } .ansi-96 { color: var(--vscode-terminal-ansiBrightCyan, #29b8db); }
+.ansi-37 { color: var(--vscode-terminal-ansiWhite, #e5e5e5); } .ansi-97 { color: var(--vscode-terminal-ansiBrightWhite, #fff); }
+/* the end-of-reply "Changed N files" line */
+.turn-changes { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-size: 0.92em; min-width: 0; }
+.turn-changes:hover { border-color: var(--focus); }
+.turn-changes > .ellipsis { flex: 1; min-width: 0; }
+/* find in chat */
+.find-bar { position: fixed; z-index: 60; display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; background: var(--vscode-editorWidget-background, var(--surface)); border: 1px solid var(--vscode-editorWidget-border, var(--border)); border-radius: 6px; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,.3)); }
+.find-bar input { width: 160px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px; padding: 2px 6px; outline: none; }
+.find-bar input:focus { border-color: var(--focus); }
+.find-count { min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
+mark.find-hit { background: var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,.33)); color: inherit; border-radius: 2px; }
+mark.find-hit.current { background: var(--vscode-editor-findMatchBackground, #a8ac94); outline: 1px solid var(--vscode-editor-findMatchBorder, transparent); }
+/* minimap beside the scrollbar */
+.minimap { position: fixed; z-index: 35; width: 4px; pointer-events: none; }
+.minimap .tick { position: absolute; left: 0; width: 4px; height: 3px; border-radius: 1px; pointer-events: auto; cursor: pointer; opacity: .85; }
+.minimap .tick:hover { opacity: 1; transform: scaleY(1.6); }
+.tick.user { background: var(--muted); }
+.tick.edit { background: var(--add); }
+.tick.error { background: var(--del); }
+.tick.ask { background: var(--vscode-editorWarning-foreground, #cca700); }
 .steps-group { border-left: 2px solid var(--border); padding-left: 10px; margin: 0 0 6px 4px; }
 .steps-group > summary, .thinking > summary, .panel summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; color: var(--muted); user-select: none; }
 .steps-group > summary::-webkit-details-marker, .thinking > summary::-webkit-details-marker, .panel summary::-webkit-details-marker { display: none; }
@@ -283,9 +336,9 @@ body.busy .restore-btn { opacity: .4; pointer-events: none; } /* visible, but a 
 .usage-empty { display: flex; gap: 8px; align-items: center; padding: 6px 0 2px; border-top: 1px solid var(--border); padding-top: 12px; }
 .usage-foot { display: flex; gap: 5px; align-items: center; }
 
-/* delete chat from the recent list: trash replaces the time on hover */
-.recent-item .delete-chat { display: none; min-height: 20px; min-width: 20px; }
-.recent-item:hover .delete-chat, .recent-item:focus-within .delete-chat { display: inline-flex; }
+/* pin / delete chat from the recent list: the buttons replace the time on hover */
+.recent-item .delete-chat, .recent-item .pin-chat { display: none; min-height: 20px; min-width: 20px; }
+.recent-item:hover :is(.delete-chat, .pin-chat), .recent-item:focus-within :is(.delete-chat, .pin-chat) { display: inline-flex; }
 .recent-item:hover .time, .recent-item:focus-within .time { display: none; }
 
 /* editor-tab header */
@@ -367,6 +420,7 @@ body.vscode-light .tk-t, body.vscode-high-contrast-light .tk-t { color: #800000;
 .loading-bar span { position: absolute; inset: 0; width: 35%; background: var(--vscode-progressBar-background, var(--accent)); animation: slide 1.4s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 .loading-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: .92em; }
+.older-loading { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 0 10px; font-size: .9em; }
 /* fills the panel, pinned to the bottom like a chat scrolled to its latest message, fading out at the top */
 .skeleton { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 9px;
   -webkit-mask-image: linear-gradient(transparent, #000 35%); mask-image: linear-gradient(transparent, #000 35%); }
