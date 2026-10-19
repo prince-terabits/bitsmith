@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.12.5
+
+- **Loading screen fills the panel.** The skeleton sat at the top with empty space below it. Now it fills the
+  whole height, anchored to the bottom like a chat scrolled to its latest message, and fades out toward the top.
+
+## 1.12.4
+
+- **Compaction now runs in the background.** 1.12.3 compacted right after the reply, but it still blocked the chat
+  until it finished. Now a second Claude Code process forks the session and runs `/compact` on the copy, so you
+  can keep reading and typing. When it's done and you haven't sent anything since, the chat continues in the
+  compacted copy and shows "Conversation auto-compacted". A message sent while it's still running waits for it
+  ("Compacting conversation…") instead of going to the long conversation. A long reply that fills the context
+  partway through still has to compact in place: the CLI can't continue without it.
+
+## 1.12.3
+
+- **Compaction no longer makes you wait.** The CLI only compacted when your next message started, so a long
+  chat would stall right as you sent it. Now, when a reply ends at 85% or more of the auto-compact point, Bitsmith
+  compacts straight away, while you're still reading. Anything you type in the meantime is queued and sent as
+  soon as it's done. It runs at most once in a row, never while messages are queued, and not when auto-compact
+  is off.
+
+## 1.12.2
+
+- **Fix: a question card could still be changed after you answered it.** Submit only swapped the buttons for
+  "Answered"; the choices stayed clickable. Answered, skipped and cancelled cards now freeze: your pick stays
+  highlighted, the rest dim and can't be clicked (the plan card's feedback box too).
+
+## 1.12.1
+
+- **Loading screen redesigned and fixed.** It looked washed out: its fade-in froze half transparent while the
+  webview was busy drawing the chat. Now: a VS Code-style progress line at the top, the chat title with a spinner,
+  and a pulsing sketch shaped like the chat's own message bubbles, at full brightness.
+
+## 1.12.0
+
+- **Loading screen when you open a past chat.** Long chats take a few seconds to read and draw; the pane now shows
+  the chat's title, a moving progress bar and a sketch of the conversation right away, instead of sitting blank.
+  Sending is held until the chat is there.
+
 ## 1.11.7
 
 Low bug fixes:

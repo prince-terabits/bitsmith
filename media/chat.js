@@ -407,6 +407,7 @@ function scrollDown(force) {
 
 function showEmpty(on) {
   if (cur !== shown) return; // the hero and recent chats belong to the chat on screen
+  if (cur.loading) on = false; // its loading screen is showing instead
   if (on && empty.parentNode !== scroll) scroll.prepend(empty); // the hero lives in whichever pane is on screen
   empty.classList.toggle("hidden", !on);
   showRecent();
@@ -430,7 +431,7 @@ function renderEmpty() {
 
 function showRecent() {
   if (cur !== shown) return;
-  recentPanel.classList.toggle("hidden", !S.sessions.length || !!scroll.querySelector(".turn"));
+  recentPanel.classList.toggle("hidden", !S.sessions.length || cur.loading || !!scroll.querySelector(".turn"));
 }
 
 function ago(t) {
@@ -689,13 +690,18 @@ function errorBox(text) {
 
 // ---------- approvals ----------
 const append = (el, ...kids) => el.append(...kids.filter(Boolean)); // optional buttons pass `false`
+// Answered or cancelled: the buttons go, and the choices and feedback box left in the card freeze as they were.
+function closeCard(actions, ...status) {
+  actions.closest(".permission")?.querySelectorAll("button, textarea").forEach((e) => (e.disabled = true));
+  actions.replaceWith(h("div", { class: "decided muted" }, ...status));
+}
 function permissionCard(m) {
   const t = ensureTurn();
   t.text = null;
   const actions = h("div", { class: "actions" });
   const decide = (allow, extra = {}, label) => {
     send({ type: "permission", id: m.id, allow, ...extra });
-    actions.replaceWith(h("div", { class: "decided muted" }, icon(allow ? "check" : "close"), label || (allow ? "Allowed" : "Rejected")));
+    closeCard(actions, icon(allow ? "check" : "close"), label || (allow ? "Allowed" : "Rejected"));
     working(S.busy);
   };
   let card;
@@ -859,7 +865,19 @@ function setPlaceholder() {
     : cur.suggestion ? `${cur.suggestion}   ⇥ Tab` : "Ask Bitsmith to build, fix or explain…";
 }
 
+// While a past chat is read and drawn: a progress line, its title, and a pulsing sketch shaped like the chat.
+function loadingScreen(title) {
+  const line = (w) => h("div", { class: "sk-line", style: `width: ${w}%` });
+  const ask = (...w) => h("div", { class: "sk-user" }, w.map(line));
+  return h("div", { class: "loading-chat", role: "status", "aria-label": "Loading the conversation" },
+    h("div", { class: "loading-bar" }, h("span")),
+    h("div", { class: "loading-head" }, icon("loading", "spin"), h("span", { class: "ellipsis" }, title || "Opening chat…")),
+    h("div", { class: "skeleton", "aria-hidden": "true" }, // enough rows for a tall panel; the rest is clipped
+      [1, 2, 3, 4].flatMap(() => [ask(90, 55), line(94), line(81), line(88), line(46), ask(70), line(90), line(72), line(84)])));
+}
+
 function submit() {
+  if (cur.loading) return; // the chat isn't there yet
   const text = input.value.trim();
   if (!text && !S.images.length) return;
   const a = S.useActive && !activeIsAttached() && S.active;
@@ -1207,7 +1225,7 @@ function handle(m) {
       return;
     }
     case "approvalsCancelled":
-      for (const a of scroll.querySelectorAll(".permission .actions")) a.replaceWith(h("div", { class: "decided muted" }, "Cancelled"));
+      for (const a of scroll.querySelectorAll(".permission .actions")) closeCard(a, "Cancelled");
       return;
     case "redone":
       if (!redo) return;
@@ -1242,12 +1260,21 @@ function handle(m) {
       showEmpty(!scroll.querySelector(".turn"));
       return;
     }
+    case "loading":
+      cur.loading = true;
+      scroll.append(loadingScreen(m.title));
+      showEmpty(false);
+      return;
     case "replay":
       for (const item of m.items) handle(item);
       finalize();
+      cur.loading = false;
+      scroll.querySelector(".loading-chat")?.remove();
+      showEmpty(!scroll.querySelector(".turn"));
       return scrollDown(true);
     case "tabState": return vscode.setState({ ...vscode.getState(), sessionId: m.sessionId }); // an editor tab reopens this chat after a reload
     case "clear":
+      cur.loading = false;
       redo = null;
       turn = null;
       scroll.replaceChildren(...(cur === shown ? [empty] : []));

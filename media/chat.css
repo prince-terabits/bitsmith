@@ -28,7 +28,7 @@ body { margin: 0; padding: 0; color: var(--fg); background: var(--bg); font-fami
 .codicon { font-size: 14px; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; display: inline-block; }
-@media (prefers-reduced-motion: reduce) { .spin, .shimmer, .turn, .menu { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .spin, .shimmer, .turn, .menu, .loading-chat, .loading-chat *, .loading-chat ::after { animation: none !important; } }
 
 /* ---------- buttons ---------- */
 button { font: inherit; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; min-height: 26px; }
@@ -173,6 +173,8 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .question .q { font-weight: 600; margin-bottom: 6px; }
 .options { display: grid; gap: 6px; }
 .option { display: block; text-align: left; width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--fg); padding: 6px 10px; }
+.option:disabled { cursor: default; }
+.option:disabled:not(.selected) { opacity: .5; }
 .option.selected { border-color: var(--focus); background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 
 /* ---------- composer ---------- */
@@ -357,3 +359,22 @@ body.vscode-light .tk-t, body.vscode-high-contrast-light .tk-t { color: #800000;
 
 /* an edit that asks even though edits normally apply on their own */
 .permission .risk { display: flex; gap: 6px; align-items: center; margin: 4px 0 8px; color: var(--vscode-editorWarning-foreground); font-size: 12px; word-break: break-all; }
+
+/* Loading a past chat. Only transform/opacity animate (compositor), so it keeps moving while the webview is busy
+   drawing the replay; no fade-in, which would freeze half transparent. */
+.loading-chat { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; }
+.loading-bar { position: relative; height: 2px; margin: -12px -14px 0; overflow: hidden; }
+.loading-bar span { position: absolute; inset: 0; width: 35%; background: var(--vscode-progressBar-background, var(--accent)); animation: slide 1.4s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.loading-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: .92em; }
+/* fills the panel, pinned to the bottom like a chat scrolled to its latest message, fading out at the top */
+.skeleton { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; gap: 9px;
+  -webkit-mask-image: linear-gradient(transparent, #000 35%); mask-image: linear-gradient(transparent, #000 35%); }
+.skeleton > * { flex-shrink: 0; }
+.sk-line { height: 9px; border-radius: 5px; background: color-mix(in srgb, var(--fg) 13%, transparent); animation: pulse 1.6s ease-in-out infinite; }
+.skeleton > :nth-child(even) { animation-delay: .2s; }
+.skeleton > :nth-child(3n) { animation-delay: .4s; }
+@keyframes pulse { 50% { opacity: .45; } }
+.sk-user { margin: 8px 0 6px 18%; display: flex; flex-direction: column; gap: 7px; padding: 11px 12px; border-radius: 12px 12px 4px 12px;
+  background: var(--vscode-chat-requestBackground, var(--surface)); border: 1px solid var(--vscode-chat-requestBorder, var(--border)); }
+.sk-user .sk-line { background: color-mix(in srgb, var(--fg) 18%, transparent); animation: none; }

@@ -329,6 +329,8 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     c.post({ type: "text", text: "to the tab" });
     assert(tab.posts.some((m) => m.text === "to the tab") && !posts.slice(st).some((m) => m.text === "to the tab"), "routed to the tab");
     tab.handlers[0]({ type: "ready" });
+    assert(tab.posts.some((m) => m.type === "loading") && !tab.posts.some((m) => m.type === "replay"), "the loading screen goes out before the slow replay");
+    await new Promise((r) => setTimeout(r, 100));
     assert(tab.posts.some((m) => m.type === "replay" && m.items.some((i) => i.text === "panel me")), "the tab replays the chat");
     assert(tab.posts.some((m) => m.type === "tabState" && m.sessionId === id), "the tab remembers its chat for a reload");
 
@@ -361,6 +363,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const back = [...provider.chats.values()].find((x) => x.panel === restored);
     back.ensure = () => {};
     tabs[2].handlers[0]({ type: "ready" });
+    await new Promise((r) => setTimeout(r, 100)); // replay follows the loading screen
     assert(tabs[2].posts.some((m) => m.type === "replay" && m.items.some((i) => i.text === "panel me")), "the restored tab replays its chat");
     tabs[2].dispose();
 
@@ -464,6 +467,24 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     e.keep(f); fs.rmSync(f);
     provider.chats.delete(c.key); c.shutdown();
     console.log("created and binary snapshots ok");
+  }
+
+  // Background compaction: skipped below 85% or with messages queued; the chat moves onto the compacted fork
+  // only if it hasn't moved on since.
+  {
+    const c = provider.createChat();
+    c.ensure = () => {}; // no real CLI
+    c.sessionId = "from"; c.lastUuid = "u1"; c.threshold = 1000; c.context = { used: 500 };
+    c.idleCompact({});
+    assert(!c.bg, "not below 85%");
+    c.context = { used: 900 }; c.queue = [{ text: "next" }]; c.idleCompact({});
+    assert(!c.bg, "not with a message queued");
+    c.lastUuid = "u2"; c.adopt("fork", { pre_tokens: 900, post_tokens: 100 }, "from", "u1");
+    assert(c.sessionId === "from", "the chat moved on: fork dropped");
+    c.adopt("fork", { pre_tokens: 900, post_tokens: 100 }, "from", "u2");
+    assert(c.sessionId === "fork" && c.context.used === 100 && c.lastUuid === "u2", "continues in the fork");
+    provider.chats.delete(c.key);
+    console.log("background compact ok");
   }
 
   // A command that `git add`s a file that was untracked: Undo and Restore must not treat it as created and delete it
@@ -772,6 +793,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const st5 = posts.length;
     provider.onWebview({ type: "ready" });
     assert.deepStrictEqual([...provider.chats.values()].map((c) => c.sessionId), ids, "both tabs reopened");
+    await new Promise((r) => setTimeout(r, 100)); // replay follows the loading screen
     assert.strictEqual(provider.active.sessionId, second.sessionId, "the tab that was on screen");
     assert.strictEqual(posts.slice(st5).filter((m) => m.type === "replay").length, 2);
     assert.strictEqual([...provider.chats.values()].filter((c) => c.claude).length, 1, "only the shown tab starts a process");
@@ -940,7 +962,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   const reopened = provider.sessionId;
   provider.closeChat(provider.active); // close its tab
   start = posts.length;
-  provider.loadSession(reopened);
+  await provider.loadSession(reopened);
   const replayed = posts.slice(start).find((m) => m.type === "replay").items.filter((i) => i.type === "user");
   assert.strictEqual(replayed.length, 2);
   assert(replayed[1].checkpoint, "second message has its restore checkpoint after reopening");

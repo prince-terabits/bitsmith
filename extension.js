@@ -200,6 +200,7 @@ class Chat {
 
   shutdown() {
     this.restart();
+    if (this.bg) { this.bg.kill(); this.bg.resolve(); this.bg = null; }
     if (this.busy) { this.busy = false; this.saveCheckpoints(); } // keep this message restorable
   }
 
@@ -255,6 +256,13 @@ class Chat {
     if (this.busy) return;
     this.busy = true;
     await vscode.workspace.saveAll(false); // Claude reads files from disk, so unsaved edits would be invisible to it
+    if (this.bg) { // a background compaction is nearly done: wait for it rather than send to the long conversation
+      this.post({ type: "status", text: "Compacting conversation…" });
+      this.holding = true;
+      await this.bg.done;
+      this.holding = false;
+      if (!this.busy) return; // stopped meanwhile
+    }
     if (this.claude && ((this.claude.effort || "") !== this.settings().effort || this.claude.compactAt !== autoCompactAt())) this.restart(); // launch flags
     const claude = this.ensure();
     this.syncSettings();
@@ -272,6 +280,43 @@ class Chat {
     this.busy = true;
     this.started = Date.now();
     this.post({ type: "autoTurn" });
+  }
+
+  // A reply that ends near the auto-compact point is compacted in the background: a second CLI forks the session
+  // there and runs /compact while the chat stays usable. The fork keeps the message ids, so when it's done
+  // and the chat hasn't moved on, the chat simply continues in the fork.
+  idleCompact(m) {
+    const at = this.lastUuid, from = this.sessionId, s = this.settings();
+    if (m.is_error || this.bg || this.queue.length || !from || !at || this.resumeAt || this.compactTried === at ||
+      !this.threshold || this.context.used < this.threshold * 0.85) return;
+    this.compactTried = at; // once per reply, so a failing compaction doesn't loop
+    let id = null, meta = null, bg;
+    const end = () => {
+      bg.kill();
+      if (this.bg !== bg) return;
+      this.bg = null;
+      if (meta && id) this.adopt(id, meta, from, at);
+      bg.resolve();
+    };
+    bg = this.bg = new Claude({ cwd: this.folder, model: s.model, effort: s.effort, resume: from, resumeAt: at, onExit: end,
+      onMessage: (x) => {
+        if (x.type === "system" && x.subtype === "init") id = x.session_id;
+        if (x.type === "system" && x.subtype === "compact_boundary") meta = x.compact_metadata || {};
+        if (x.type === "result") end();
+      } });
+    bg.done = new Promise((r) => (bg.resolve = r));
+    bg.write({ type: "user", message: { role: "user", content: [{ type: "text", text: "/compact" }] } });
+  }
+
+  // Continue in the compacted fork, unless the chat moved on since it was made.
+  adopt(id, meta, from, at) {
+    if (this.sessionId !== from || this.lastUuid !== at || this.resumeAt || this.tasks.length || this.pending.size || (this.busy && !this.holding)) return;
+    this.restart();
+    this.sessionId = id;
+    this.post({ type: "notice", icon: "fold", text: compactText(meta.pre_tokens, meta.post_tokens, "auto") });
+    this.setContext(meta.post_tokens || 0, this.model);
+    this.p.chatChanged(this);
+    this.ensure();
   }
 
   // ---- CLI messages ----
@@ -305,6 +350,7 @@ class Chat {
       this.setContext(this.context.used, this.model);
       this.refreshThreshold(); // the model may have changed
       if (this.busy) this.finish({ cost: m.total_cost_usd });
+      this.idleCompact(m);
     } else if (m.type === "control_request") {
       if (m.request.subtype === "can_use_tool") this.ask(m.request_id, m.request);
       else if (m.request.subtype === "hook_callback") this.preBash(m.request_id, m.request);
@@ -660,7 +706,8 @@ class Chat {
 
   // ---- history ----
 
-  loadSession(id) {
+  // Async: a long chat takes a while to read and render, so the loading screen goes out first.
+  async loadSession(id) {
     this.shutdown();
     this.sessionId = id;
     this.resumeAt = null;
@@ -669,9 +716,15 @@ class Chat {
     this.checkpoints = [];
     this.redoStack = [];
     this.post({ type: "clear" });
+    this.updateTitle();
+    this.post({ type: "loading", title: this.title });
+    const load = (this.loads = (this.loads || 0) + 1);
+    await new Promise((r) => setTimeout(r, 30)); // messages only leave the extension host once it is free
+    if (this.loads !== load || this.sessionId !== id) return; // opened again, or cleared, meanwhile
     const file = path.join(this.sessionDir(), id + ".jsonl");
     this.lastUuid = lastAssistantUuid(file);
-    const items = replay(file, (f) => this.rel(f));
+    let items = [];
+    try { items = replay(file, (f) => this.rel(f)); } catch {} // an unreadable chat still ends the loading screen
     const saved = new Map(this.p.loadCheckpoints(id).map((c) => [c.key, c]));
     let n = 0;
     for (const it of items) {
@@ -683,7 +736,6 @@ class Chat {
     this.post({ type: "replay", items });
     const last = lastUsage(file);
     if (last) this.setContext(last.used, last.model);
-    this.updateTitle();
     if (this.p.active === this) this.ensure(); // restored background tabs start their process when shown
   }
 
@@ -1137,7 +1189,7 @@ class ChatProvider {
       this.post({ type: "openChat", chat: c.key });
       this.switchTo(c);
     }
-    c.loadSession(id);
+    return c.loadSession(id);
   }
 
   chatChanged(c) {
