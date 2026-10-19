@@ -582,7 +582,28 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     provider.shutdown();
     process.exit(0);
   }
-  if (process.argv.includes("--quick")) process.exit(0);
+  if (process.argv.includes("--quick")) {
+    // unreviewed changes survive a window reload and come back in the chat that made them
+    const f = path.join(cwd, "r.txt");
+    fs.writeFileSync(f, "old\n");
+    provider.edits.snapshot(f);
+    fs.writeFileSync(f, "new\n");
+    provider.active.sessionId = "11111111-1111-1111-1111-111111111111";
+    provider.active.touched.add(f);
+    provider.edits.refresh();
+    await new Promise((r) => setTimeout(r, 200));
+    provider.shutdown();
+    ext.activate(ctx);
+    assert.strictEqual(provider.edits.snapshots.get(f), "old\n", "snapshot restored");
+    provider.active.sessionId = "11111111-1111-1111-1111-111111111111";
+    provider.edits.refresh();
+    await new Promise((r) => setTimeout(r, 200));
+    assert(provider.active.touched.has(f), "back in its chat's changed files");
+    await provider.edits.undo([f]);
+    assert.strictEqual(fs.readFileSync(f, "utf8"), "old\n", "Undo still works after the reload");
+    console.log("pending edits survive reload ok");
+    process.exit(0);
+  }
 
   // background work: an async sub-agent and a background command, Claude's own follow-up, Stop, and two chats at once
   // Shell commands get Keep/Undo and checkpoints like Edit/Write, also in a nested repo the folder's .gitignore excludes

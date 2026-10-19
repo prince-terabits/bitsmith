@@ -723,6 +723,7 @@ class Chat {
     this.checkpoints = [];
     this.redoStack = [];
     this.post({ type: "clear" });
+    this.edits.refresh(); // its unreviewed changes from before a reload come back
     this.updateTitle();
     this.post({ type: "loading", title: this.title });
     const load = (this.loads = (this.loads || 0) + 1);
@@ -818,13 +819,20 @@ class ChatProvider {
     this.edits = new EditTracker((files) => {
       for (const c of this.chats.values()) {
         for (const f of c.touched) if (!this.edits.snapshots.has(f)) c.touched.delete(f);
+        for (const f of this.edits.snapshots.keys()) if (c.sessionId && this.editOwners[f] === c.sessionId) c.touched.add(f); // reopened after a reload
         c.post({ type: "changes", files: files.filter((f) => c.touched.has(f.file)).map((f) => ({ ...f, rel: this.rel(f.file) })) });
       }
+      this.saveEdits();
     });
     this.chats = new Map(); // key -> Chat, in tab order
     this.nextKey = 1;
     this.active = this.createChat();
     this.ws = context.workspaceState || this.state; // open tabs are per workspace
+    // Unreviewed agent changes (Keep / Undo) and the chat that made each, kept across window reloads.
+    const pending = this.ws.get("pendingEdits");
+    this.editOwners = pending?.owners || {};
+    this.edits.load(pending?.snapshots);
+    this.edits.refresh();
     this.windows = this.state.get("contextWindows", {}); // model -> context window, learned from the CLI
   }
 
@@ -847,6 +855,16 @@ class ChatProvider {
       vscode.commands.executeCommand("bitsmith.chat.focus");
       this.switchTo(c);
     });
+  }
+
+  saveEdits() {
+    const owners = {};
+    for (const f of this.edits.snapshots.keys()) owners[f] = [...this.chats.values()].find((c) => c.sessionId && c.touched.has(f))?.sessionId || this.editOwners[f] || null;
+    this.editOwners = owners;
+    const data = JSON.stringify({ snapshots: this.edits.dump(), owners });
+    if (data === this.savedEdits) return; // refresh runs on every keystroke in a changed file
+    this.savedEdits = data;
+    this.ws.update("pendingEdits", JSON.parse(data));
   }
 
   // Tabs survive a window reload: their session ids (and typed-ahead messages) are saved and reopened when the panel loads.

@@ -107,8 +107,11 @@ const effortBtn = h("button", { class: "pill" });
 const policyBtn = h("button", { class: "pill subtle" });
 const dropOverlay = h("div", { class: "drop" }, icon("cloud-upload"), h("span", {}, "Drop to attach files, folders or images"));
 
+const editBar = h("div", { class: "edit-bar hidden" }, icon("edit"), h("span", { class: "grow ellipsis" }, "Editing message · Send replaces it and its reply"),
+  h("button", { class: "icon-btn", title: "Cancel edit (Esc)", onclick: () => cancelEdit() }, icon("close")));
+
 const box = h("div", { class: "box" },
-  dropOverlay, chips, input, slash,
+  dropOverlay, editBar, chips, input, slash,
   h("div", { class: "toolbar" }, modeBtn, modelBtn, effortBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
 );
 const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
@@ -146,8 +149,30 @@ function menu(anchor, title, options, current, onPick) {
   const r = anchor.getBoundingClientRect();
   el.style.left = Math.max(6, Math.min(r.left, window.innerWidth - el.offsetWidth - 6)) + "px";
   el.style.bottom = window.innerHeight - r.top + 4 + "px";
+  if (el.getBoundingClientRect().top < 6) { el.style.bottom = ""; el.style.top = r.top + 4 + "px"; } // no room above: open below
   openMenu = el;
 }
+
+// Right-click in the chat: actions for what's under the pointer, instead of the webview's Cut/Copy/Paste
+// (its Copy can't reach the clipboard here). Text boxes keep the native menu.
+document.addEventListener("contextmenu", (e) => {
+  if (e.target.closest("textarea, input")) return;
+  e.preventDefault();
+  const sel = getSelection().toString(), turn = e.target.closest(".turn"), user = e.target.closest(".user-msg");
+  const code = e.target.closest(".codeblock")?.querySelector("code");
+  const edit = user && $(".edit-btn", user), answer = !user && turn?.querySelector('.msg-actions [title="Copy answer"]');
+  const retry = turn?.querySelector('.msg-actions [title="Retry this message"]');
+  const opts = [
+    sel && { label: "Copy", icon: "copy", value: () => send({ type: "copy", text: sel }) },
+    code && { label: "Copy code", icon: "code", value: () => send({ type: "copy", text: code.textContent }) },
+    user && { label: "Copy message", icon: "copy", value: () => { const text = $(".user-text", user).textContent; copied = { text, images: user.images || [] }; send({ type: "copy", text }); } },
+    edit && !S.busy && { label: "Edit message", icon: "edit", value: () => edit.click() },
+    answer && { label: "Copy answer", icon: "copy", value: () => answer.click() },
+    retry && !S.busy && { label: "Retry", icon: "refresh", value: () => retry.click() },
+    { label: "Find in chat", icon: "search", value: openFind },
+  ].filter(Boolean);
+  menu({ getBoundingClientRect: () => ({ left: e.clientX, top: e.clientY }) }, "", opts, null, (f) => f());
+});
 
 const MODES = [
   { value: "agent", label: "Agent", icon: "hubot", description: "Edits files and runs commands" },
@@ -334,6 +359,7 @@ input.addEventListener("keydown", (e) => {
   }
   if (e.key === "Tab" && !e.shiftKey && !input.value && cur.suggestion && !S.busy) { e.preventDefault(); input.value = cur.suggestion; return autosize(); }
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+  if (e.key === "Escape" && cur.editing) { e.preventDefault(); cancelEdit(); }
   // shell-style recall: Up on the first line / Down on the last line walks past prompts
   const up = e.key === "ArrowUp" && !input.value.slice(0, input.selectionStart).includes("\n");
   const down = e.key === "ArrowDown" && !input.value.slice(input.selectionEnd).includes("\n");
@@ -357,8 +383,15 @@ input.addEventListener("keydown", (e) => {
 });
 let histAt = -1, histDraft = "", histList = [];
 input.addEventListener("input", () => { histAt = -1; });
+// The clipboard only takes text from here, so a copied message's images wait in this webview and come back
+// when that same text is pasted. ponytail: this view only; route through the extension for other tabs.
+let copied = null;
 input.addEventListener("paste", (e) => {
   const raw = e.clipboardData.getData("text/plain") || "";
+  if (raw && copied?.text === raw && copied.images.length) {
+    S.images.push(...copied.images.filter((img) => !S.images.some((x) => x.data === img.data)));
+    renderChips();
+  }
   for (const item of e.clipboardData.items) {
     if (!item.type.startsWith("image/") || raw.trim()) continue; // with text too (spreadsheet cells come with a picture of themselves), the text wins
     e.preventDefault();
@@ -446,41 +479,50 @@ function ago(t) {
 function userBubble({ text, chips: c = [], images = [] }, checkpoint) {
   const textEl = h("div", { class: "user-text" }, text);
   const bubble = h("div", { class: "user-msg" },
-    checkpoint && h("button", { class: "icon-btn edit-btn", title: "Edit message", onclick: () => editMessage(bubble, textEl, checkpoint) }, icon("edit")),
+    checkpoint && h("button", { class: "icon-btn edit-btn", title: "Edit message", onclick: () => editMessage(bubble, checkpoint) }, icon("edit")),
     c.length || images.length ? h("div", { class: "chips" }, c.map((x) => chip(x)), images.map((img, i) => imageChip(img, images.length > 1 ? i + 1 : 1))) : null,
     textEl);
+  bubble.images = images; // "Copy message" carries them along
   return bubble;
 }
 
-// Inline edit: resending restores the checkpoint before this message, then sends the new text.
-function editMessage(bubble, textEl, checkpoint) {
-  if (S.busy || bubble.classList.contains("editing")) return;
-  const original = textEl.textContent;
-  const area = h("textarea", { class: "edit-area", rows: 1 });
-  area.value = original;
-  const done = () => { bubble.classList.remove("editing"); editor.replaceWith(textEl); };
-  const save = () => {
-    if (S.busy || bubble.classList.contains("pending")) return; // one resend at a time, never mid-reply
-    const text = area.value.trim();
-    if (!text || text === original) return done();
-    bubble.classList.add("pending");
-    send({ type: "editMessage", checkpoint, text });
-  };
-  area.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); save(); }
-    if (e.key === "Escape") { e.preventDefault(); done(); }
-  });
-  area.addEventListener("input", () => { area.style.height = "auto"; area.style.height = area.scrollHeight + "px"; });
-  const editor = h("div", { class: "edit-box" }, area,
-    h("div", { class: "edit-actions" }, h("span", { class: "muted small grow" }, "Enter to resend · Esc to cancel"),
-      h("button", { class: "small", onclick: done }, "Cancel"),
-      h("button", { class: "primary small", onclick: save }, icon("send"), "Send")));
+// Edit loads the message (text, files, images) into the chat input; Send there restores the checkpoint
+// before it and sends the new version in its place. Whatever was typed before comes back on cancel.
+function editMessage(bubble, checkpoint) {
+  if (S.busy) return;
+  const p = bubble.closest(".turn")?.payload || {};
+  const prev = cur.editing?.prev || { text: input.value, items: S.items, images: S.images };
+  cur.editing?.bubble.classList.remove("editing");
+  cur.editing = { checkpoint, bubble, prev };
   bubble.classList.add("editing");
-  textEl.replaceWith(editor);
-  bubble.cancelEdit = done;
-  area.focus();
-  area.setSelectionRange(area.value.length, area.value.length);
-  area.dispatchEvent(new Event("input"));
+  fillComposer($(".user-text", bubble).textContent.replace(/^See the attached image\.$/, ""), [...(p.items || [])], [...(bubble.images || [])]);
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function cancelEdit() {
+  if (!cur.editing) return;
+  const { prev } = cur.editing;
+  endEdit();
+  fillComposer(prev.text, prev.items, prev.images);
+}
+
+function endEdit() {
+  cur.editing?.bubble.classList.remove("editing");
+  cur.editing = null;
+  renderEditBar();
+}
+
+function renderEditBar(c = shown) { editBar.classList.toggle("hidden", !c?.editing); }
+
+function fillComposer(text, items, images) {
+  input.value = text;
+  S.items = items;
+  S.images = images;
+  hidePreview();
+  renderChips();
+  renderEditBar();
+  autosize();
+  input.focus();
 }
 
 function startTurn(user, payload) {
@@ -996,6 +1038,8 @@ function submit() {
   const a = S.useActive && !activeIsAttached() && S.active;
   const chipsShown = [...(a ? [{ kind: "file", rel: a.rel, file: a.file, range: a.selection ? `${a.selection.start}-${a.selection.end}` : "" }] : []), ...S.items];
   const payload = { text: text || "See the attached image.", images: S.images, items: S.items, useActive: !!a, chips: chipsShown };
+  // the input stays filled until the extension has restored the checkpoint (its confirm can be cancelled)
+  if (cur.editing) return void (!S.busy && (cur.editing.sent = payload, send({ type: "editMessage", checkpoint: cur.editing.checkpoint, text: payload.text })));
   if (S.busy) { cur.queue.push(payload); renderQueue(); } // sent when this reply ends, like typing ahead in the terminal
   else dispatch(payload);
   if (text) {
@@ -1220,6 +1264,7 @@ function swapDraft(from, to) {
   S.useActive = d.useActive;
   hidePreview();
   renderChips();
+  renderEditBar(to);
   autosize();
 }
 
@@ -1357,10 +1402,7 @@ function handle(m) {
       return;
     case "user": return startTurn({ text: m.text, chips: m.chips || [], images: m.images || [] }, m.checkpoint ? { checkpoint: m.checkpoint, text: m.text, chips: m.chips || [], items: [], images: m.images || [], useActive: false } : null);
     case "editCancelled": {
-      const b = scroll.querySelector(`.turn[data-checkpoint="${m.checkpoint}"] .user-msg`);
-      if (!b?.classList.contains("pending")) return; // a cancelled Retry: leave an open edit alone
-      b.classList.remove("pending");
-      b.cancelEdit?.();
+      if (cur.editing) cur.editing.sent = null; // keep editing
       return;
     }
     case "approvalsCancelled":
@@ -1390,7 +1432,9 @@ function handle(m) {
         S.todos = [];
         renderTodos();
         showEmpty(false);
-        dispatch({ ...payload, text: m.resend, chips: payload.chips || [] });
+        const sent = cur.editing?.checkpoint === m.checkpoint && cur.editing.sent;
+        if (sent) { const { prev } = cur.editing; endEdit(); cur === shown ? fillComposer(prev.text, prev.items, prev.images) : (cur.draft = { ...cur.draft, ...prev }); }
+        dispatch(sent || { ...payload, text: m.resend, chips: payload.chips || [] });
         return;
       }
       if (payload) setDraft(cur, payload.text === "See the attached image." ? "" : payload.text, payload.items || []);

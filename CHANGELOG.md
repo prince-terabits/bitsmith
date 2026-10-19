@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.19.1
+
+- **Keep / Undo survives a window reload.** Unreviewed agent changes (the green/red highlights, Keep/Undo lenses and
+  the chat's "files changed" list) were held only in memory and vanished on Reload Window. They're now saved per
+  workspace and come back in the chat that made them.
+
+## 1.19.0
+
+- **Edit message uses the chat input.** The pencil (or right-click → Edit message) loads the message's text, files
+  and images into the message box, with an "Editing message" bar above it. Send replaces the message and its reply;
+  Esc or × cancels and brings back what you had typed before.
+
+## 1.18.1
+
+- **"Copy message" keeps its images.** Pasting the copied text into the message box adds the message's pasted images
+  back as chips (no duplicates). Works within the same chat view.
+
+## 1.18.0
+
+- **Right-click menu in the chat.** This replaces the webview's Cut/Copy/Paste, whose Copy didn't reach the
+  clipboard. The menu offers whatever applies to the spot you clicked: Copy (selected text), Copy code (in a code
+  block), Copy message / Edit message (on your message), Copy answer, Retry, and Find in chat. The message box keeps its
+  normal menu.
+
 ## 1.17.2
 
 - **Smoother "Changed N files" diff.** Both sides of the reply's multi-file diff are now read-only snapshots, so

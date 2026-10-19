@@ -111,6 +111,15 @@ class EditTracker {
     if (!this.snapshots.has(file)) this.snapshots.set(file, Buffer.isBuffer(text) ? readSnapshot(text) : text);
   }
 
+  // Snapshots as JSON-safe values (binary as base64), so pending reviews survive a window reload.
+  dump() {
+    return Object.fromEntries([...this.snapshots].map(([f, v]) => [f, Buffer.isBuffer(v) ? { b: v.toString("base64") } : v]));
+  }
+
+  load(saved) {
+    for (const [f, v] of Object.entries(saved || {})) if (!this.snapshots.has(f)) this.snapshots.set(f, v && typeof v === "object" ? Buffer.from(v.b, "base64") : v);
+  }
+
   bytes(file) {
     try { return fs.readFileSync(file); } catch { return null; }
   }
