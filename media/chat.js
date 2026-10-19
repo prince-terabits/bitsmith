@@ -143,7 +143,7 @@ document.addEventListener("mousedown", (e) => { if (openMenu && !openMenu.contai
 function menu(anchor, title, options, current, onPick) {
   closeMenu();
   const el = h("div", { class: "menu" }, title && h("div", { class: "menu-title" }, title),
-    options.map((o) => h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, onclick: () => { closeMenu(); onPick(o.value); } },
+    options.map((o) => o.sep ? h("div", { class: "menu-sep" }) : h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, title: o.title || "", onclick: () => { closeMenu(); onPick(o.value); } },
       h("span", { class: "check" }, o.value === current ? icon("check") : null),
       h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label), o.description && h("div", { class: "muted small" }, o.description)))));
   document.body.append(el);
@@ -176,9 +176,11 @@ document.addEventListener("contextmenu", (e) => {
 });
 
 const MODES = [
-  { value: "agent", label: "Agent", icon: "hubot", description: "Edits files and runs commands" },
-  { value: "plan", label: "Plan", icon: "list-ordered", description: "Researches and proposes a plan first, no edits" },
+  { value: "agent", label: "Agent", icon: "hubot", description: "Edits files and runs commands; plans first when the task is big" },
+  { value: "ask", label: "Ask", icon: "comment-discussion", description: "Answers questions about your code, no edits or commands" },
 ];
+// the built-in modes, then .github/agents/*.agent.md from the folder and the user profile
+const allModes = () => [...MODES, ...(S.agents || []).map((a) => ({ ...a, icon: "person" }))];
 const POLICIES = [
   { value: "review", label: "Review edits", icon: "shield", description: "Edits apply now, Keep or Undo later. Commands ask." },
   { value: "ask", label: "Ask before edits", icon: "question", description: "Every edit asks first, with a diff" },
@@ -197,7 +199,7 @@ function currentModel() {
 }
 
 function renderToolbar() {
-  const mode = MODES.find((m) => m.value === S.mode) || MODES[0];
+  const mode = allModes().find((m) => m.value === S.mode) || MODES[0];
   modeBtn.replaceChildren(icon(mode.icon), mode.label, icon("chevron-down", "chev"));
   const model = currentModel();
   const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
@@ -209,7 +211,13 @@ function renderToolbar() {
   policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
   policyBtn.classList.toggle("danger", S.policy === "bypass");
 }
-modeBtn.onclick = () => menu(modeBtn, "Mode", MODES, S.mode, (v) => setSetting("mode", v));
+// Copilot-style: plain names (descriptions on hover), Agent, then Ask and the custom agents, then Configure
+modeBtn.onclick = () => {
+  const plain = (m) => ({ value: m.value, label: m.label, title: m.description });
+  const [agent, ...rest] = allModes();
+  menu(modeBtn, "", [plain(agent), { sep: true }, ...rest.map(plain), { sep: true }, { value: "configure", label: "Configure Custom Agents…" }], S.mode,
+    (v) => v === "configure" ? send({ type: "configureAgents" }) : setSetting("mode", v));
+};
 modelBtn.onclick = () => menu(modelBtn, "Model", (S.models.length ? S.models : [{ value: "default", displayName: "Default" }]).map((m) => ({ value: m.value, label: m.displayName || m.value, description: m.description })), S.model, (v) => {
   setSetting("model", v);
   const levels = currentModel().supportedEffortLevels || [];
@@ -1374,7 +1382,7 @@ function handle(m) {
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
-    case "settings": Object.assign(S, { model: m.model, effort: m.effort, mode: m.mode, policy: m.policy }); return renderToolbar();
+    case "settings": Object.assign(S, { model: m.model, effort: m.effort, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
     case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
     case "usage": S.usage = m.usage; S.plan = m.plan; return renderUsage();
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;

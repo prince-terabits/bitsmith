@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.23.0
+
+- **Simpler Mode menu, like Copilot's:** just the names (hover for what each does): Agent, then Ask and your custom
+  agents, then **Configure Custom Agents…**, which opens an agent's file or creates a new one in this folder or your
+  user profile.
+
+## 1.22.0
+
+- **Plan is part of Agent now.** Like Claude Code in a terminal, Agent decides per request: a heavy task (new feature,
+  several files, unclear approach) gets researched and a plan proposed for approval first; a small one just happens.
+  Say "skip planning" to go straight to work. The separate Plan mode is gone (a saved Plan choice becomes Agent).
+- **User-profile agents.** `.agent.md` files in your VS Code user `prompts` folder show in the Mode picker after the
+  folder's `.github/agents`, and update when they change.
+
+## 1.21.0
+
+- **Ask mode** in the Mode picker (between Agent and Plan): answers questions about your code; it can read and
+  search but can't edit files or run commands, and shows changes as code blocks instead.
+- **Custom agents.** Every `.github/agents/*.agent.md` in the folder (Copilot's format) shows in the Mode picker.
+  Its body becomes the instructions; its `tools` list decides access (no `edit` → can't edit, no `execute` /
+  `runCommands` / `terminal` → can't run commands, no list → everything). The list updates when the files change.
+- Switching mode takes effect on your next message (the chat keeps its history).
+
 ## 1.20.0
 
 - **Unsent message survives a reload.** Text, attached files and pasted images in the message box come back after

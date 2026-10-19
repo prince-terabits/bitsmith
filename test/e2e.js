@@ -22,6 +22,7 @@ const vscode = {
   StatusBarAlignment: { Right: 2 }, MarkdownString: class { constructor() { this.value = ""; } appendMarkdown(t) { this.value += t; } },
   TreeItem: class { constructor(label) { this.label = label; } }, ThemeIcon: class { constructor(id) { this.id = id; } },
   WorkspaceEdit: class { replace(u, r, t) { this.t = t; this.u = u; } },
+  RelativePattern: class { constructor(base, pattern) { Object.assign(this, { base, pattern }); } },
   Uri: { joinPath: () => "", file: (f) => uri({ scheme: "file", path: f }), from: uri, parse: (s) => uri({ scheme: "file", path: s.replace("file://", "") }) },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: cwd } }],
@@ -31,6 +32,7 @@ const vscode = {
     openTextDocument: async (f) => ({ uri: vscode.Uri.file(f), getText: () => fs.readFileSync(f, "utf8"), lineCount: 1, validateRange: (r) => r, save: async () => true }),
     fs: { stat: async (u) => ({ type: fs.statSync(u.fsPath).isDirectory() ? 2 : 1 }) },
     findFiles: async () => [],
+    createFileSystemWatcher: () => ({ onDidCreate() {}, onDidChange() {}, onDidDelete() {}, dispose() {} }),
     saveAll: async () => true,
   },
   window: {
@@ -628,6 +630,28 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     const names = res.map((r) => path.basename(r[0].fsPath)).sort();
     assert(names.includes("a.txt") && names.includes("b.txt"), names.join()); // a.txt modified, b.txt never committed
     console.log("compare with last commit ok:", names.join(", "));
+
+    // Ask mode and the folder's .github/agents/*.agent.md in the Mode picker
+    fs.mkdirSync(".github/agents", { recursive: true });
+    fs.writeFileSync(".github/agents/Reviewer.agent.md", "---\nname: Reviewer\ndescription: 'Reviews code'\ntools: ['read', 'search']\n---\nOnly review.\n");
+    fs.writeFileSync(".github/agents/Builder.agent.md", "Build things.\n"); // no front matter: every tool
+    const userDir = path.join(cwd, ".storage", "..", "..", "prompts"); // the user profile's <User>/prompts, next to globalStorage
+    fs.mkdirSync(userDir, { recursive: true });
+    const userAgent = path.join(userDir, `bs-test-${process.pid}.agent.md`);
+    fs.writeFileSync(userAgent, "---\nname: Mine\n---\nMy agent.\n");
+    provider.agentList = null;
+    const listed = provider.settings().agents.map((a) => [a.value, a.label, a.description]);
+    fs.rmSync(userAgent);
+    assert.deepStrictEqual(listed.filter((a) => !a[0].startsWith("agent:~/") || a[1] === "Mine"),
+      [["agent:Builder.agent.md", "Builder", "Custom agent"], ["agent:Reviewer.agent.md", "Reviewer", "Reviews code"], [`agent:~/bs-test-${process.pid}.agent.md`, "Mine", "Custom agent"]]);
+    assert(provider.launchAgent(`agent:~/bs-test-${process.pid}.agent.md`).prompt.includes("My agent."), "user profile agent");
+    provider.state.update("mode", "plan");
+    assert.strictEqual(provider.settings().mode, "agent", "an old Plan setting becomes Agent");
+    const rev = provider.launchAgent("agent:Reviewer.agent.md");
+    assert(rev.prompt.includes("Only review.") && rev.disallowed.includes("Edit") && rev.disallowed.includes("Bash"), "read-only agent");
+    assert.deepStrictEqual(provider.launchAgent("agent:Builder.agent.md").disallowed, []);
+    assert(provider.launchAgent("ask").disallowed.includes("Write") && /EnterPlanMode/.test(provider.launchAgent("agent").prompt), "Ask is read-only, Agent plans big tasks");
+    console.log("ask mode and custom agents ok");
     process.exit(0);
   }
 
@@ -691,14 +715,14 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     let planFile;
     vscode.window.showTextDocument = async (u) => { planFile = u.fsPath; };
     vscode.window.showInformationMessage = async () => undefined;
-    provider.setSetting("mode", "plan");
+    provider.setSetting("mode", "agent");
     onPerm = async (m) => {
       if (m.kind !== "plan") return;
       await provider.onWebview({ type: "editPlan", id: m.id });
       fs.writeFileSync(planFile, "1. Create c.txt containing exactly the word EDITED-BY-USER\n");
       provider.onWebview({ type: "permission", id: m.id, allow: true });
     };
-    const p = await turn("Plan how to add a c.txt file containing the word hi. Keep the plan to 2 short steps, then present it for approval.");
+    const p = await turn("Enter plan mode and plan how to add a c.txt file containing the word hi. Keep the plan to 2 short steps, then present it for approval.");
     assert(p.some((m) => m.type === "planText" && /EDITED-BY-USER/.test(m.plan)), "the card shows the edited plan");
     assert(!fs.existsSync(planFile), "the temp plan file is removed");
     const log = fs.readFileSync(path.join(provider.sessionDir(), provider.sessionId + ".jsonl"), "utf8");
@@ -1003,13 +1027,13 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   assert(items.some((i) => i.type === "tool" && i.title === "Edited"));
   console.log("history ok:", ext.sessionTitle(file));
 
-  // plan mode: Claude proposes a plan, approving it switches back to agent mode
-  provider.setSetting("mode", "plan");
+  // Agent plans a heavy task on its own: EnterPlanMode runs without a card, the plan gets one
+  provider.setSetting("mode", "agent");
   onPerm = (m) => provider.onWebview({ type: "permission", id: m.id, allow: m.kind === "plan" });
-  p = await turn("Plan how to add a c.txt file containing the word hi. Keep the plan to 2 short steps, then present it for approval.");
+  p = await turn("Heavy task: design and add a small logging module used by every file in this folder, with config, rotation and tests. Plan it first; keep the plan to 3 short steps.");
   assert(p.some((m) => m.type === "permission" && m.kind === "plan" && m.plan), "plan card shown. tools: " + p.filter((m) => m.type === "tool").map((m) => m.name).join(",") + " text: " + said(p).slice(0, 300));
-  assert(p.some((m) => m.type === "settings" && m.mode === "agent"), "approving the plan returns to agent mode");
-  console.log("plan mode ok");
+  assert(!p.some((m) => m.type === "permission" && m.name === "EnterPlanMode"), "entering plan mode doesn't ask");
+  console.log("agent plans first ok");
 
   // restore checkpoint: files and conversation go back to before message 2
   vscode.window.showWarningMessage = async () => "Restore";

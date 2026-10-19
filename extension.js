@@ -12,6 +12,38 @@ const PROPOSED = "bitsmith-proposed";
 const USAGE_POLL = 2 * 60 * 1000; // plan usage refresh while the window is focused
 const proposed = new Map(); // proposed-file uri -> content, right side of an "ask first" diff
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const ASK_PROMPT = "You are in Ask mode: answer questions about the code, explain, and suggest. You can read and search files, but you can't edit files or run commands. When a change would help, show it as a code block in your answer instead of applying it.";
+// Agent mode plans on its own, like Claude Code in a terminal: big work goes through plan mode first, small work just happens.
+const AGENT_PROMPT = "Decide first whether the request is heavy or small. Heavy means a new feature or subsystem, changes to several files, an unclear approach, or a design choice the user should weigh in on. For a heavy request your very first tool call must be EnterPlanMode, before any edit or command: research read-only, present the plan with ExitPlanMode, and implement it once the user approves. Small means a fix, a question, or a change to one or two files: just do it without planning. When the user explicitly asks to skip planning, skip it.";
+// Copilot's user-profile agents live next to globalStorage: <User>/prompts/*.agent.md
+const userAgentDir = () => storageDir && path.join(storageDir, "..", "..", "prompts");
+
+// Adding, editing or deleting an .agent.md updates the Mode picker; a running chat picks it up on its next message.
+function agentWatchers(provider) {
+  const changed = () => { provider.agentList = null; provider.post({ type: "settings", ...provider.settings() }); };
+  const globs = ["**/.github/agents/*.agent.md", userAgentDir() && new vscode.RelativePattern(vscode.Uri.file(userAgentDir()), "*.agent.md")];
+  return globs.filter(Boolean).map((g) => {
+    const w = vscode.workspace.createFileSystemWatcher(g);
+    w.onDidCreate(changed); w.onDidChange(changed); w.onDidDelete(changed);
+    return w;
+  });
+}
+
+// A Copilot-style .agent.md: optional front matter (name, description, tools: [...]) and the instructions after it.
+// `file` is "<name>.agent.md" for the folder's agents and "~/<name>.agent.md" for the user profile's.
+function parseAgent(file, text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  const meta = {};
+  for (const line of (m?.[1] || "").split(/\r?\n/)) {
+    const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
+    if (kv) meta[kv[1]] = kv[2].trim().replace(/^(['"])(.*)\1$/, "$2");
+  }
+  let tools = null;
+  try { if (meta.tools) tools = JSON.parse(meta.tools.replace(/'/g, '"')); } catch {}
+  const label = meta.name || file.replace(/^~\//, "").replace(/\.agent\.md$/, "");
+  const description = meta.description && meta.description.length > 90 ? meta.description.slice(0, 89) + "…" : meta.description || "Custom agent";
+  return { value: `agent:${file}`, label, description, tools: Array.isArray(tools) ? tools : null, prompt: (m ? text.slice(m[0].length) : text).trim() };
+}
 const PRE_BASH = "bitsmith_pre_bash"; // hook callback the CLI calls (and waits for) before each shell command
 const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
@@ -49,11 +81,14 @@ function autoCompactAt() {
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
-  constructor({ cwd, model, effort, resume, resumeAt, onMessage, onExit }) {
+  constructor({ cwd, model, effort, resume, resumeAt, agent, onMessage, onExit }) {
     const cfg = vscode.workspace.getConfiguration("bitsmith");
     const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
     if (model && model !== "default") args.push("--model", model);
+    if (agent?.prompt) args.push("--append-system-prompt", agent.prompt); // Ask mode or a custom agent
+    if (agent?.disallowed?.length) args.push("--disallowedTools", agent.disallowed.join(","));
+    this.agentKey = agent?.key || "";
     if (effort) args.push("--effort", effort);
     if (resume) args.push("--resume", resume);
     if (resume && resumeAt) args.push("--resume-session-at", resumeAt, "--fork-session"); // rewind: continue from that reply in a new branch
@@ -164,7 +199,7 @@ class Chat {
     }
     const s = this.settings();
     const claude = new Claude({
-      cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt,
+      cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt, agent: this.p.launchAgent(s.mode),
       onMessage: (m) => this.claude === claude && this.handle(m), // lines a killed process still had buffered are dropped
       onExit: (err) => {
         if (this.claude !== claude) return;
@@ -176,20 +211,18 @@ class Chat {
       },
     });
     claude.model = s.model;
-    claude.mode = "default";
     this.claude = claude;
     claude.request({ subtype: "initialize", promptSuggestions: true, hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
     this.syncSettings();
     return claude;
   }
 
-  // Model and mode are global settings; a chat picks up changes made while it was in the background.
+  // The model is a global setting; a chat picks up changes made while it was in the background. (Modes are launch flags,
+  // and planning is Claude's own EnterPlanMode / ExitPlanMode, so the CLI keeps its permission mode itself.)
   syncSettings() {
     const c = this.claude, s = this.settings();
     if (!c) return;
-    const mode = s.mode === "plan" ? "plan" : "default";
     if (c.model !== s.model) { c.model = s.model; c.request({ subtype: "set_model", model: s.model }); }
-    if (c.mode !== mode) { c.mode = mode; c.request({ subtype: "set_permission_mode", mode }); }
   }
 
   restart() {
@@ -265,7 +298,8 @@ class Chat {
       this.holding = false;
       if (!this.busy) return; // stopped meanwhile
     }
-    if (this.claude && ((this.claude.effort || "") !== this.settings().effort || this.claude.compactAt !== autoCompactAt())) this.restart(); // launch flags
+    if (this.claude && ((this.claude.effort || "") !== this.settings().effort || this.claude.compactAt !== autoCompactAt()
+      || this.claude.agentKey !== this.p.launchAgent(this.settings().mode).key)) this.restart(); // launch flags
     const claude = this.ensure();
     this.syncSettings();
     this.started = Date.now();
@@ -600,6 +634,7 @@ class Chat {
     const allow = (input = req.input, extra = {}) => this.claude?.respond(id, { behavior: "allow", updatedInput: input, ...extra });
     const file = req.input.file_path || req.input.notebook_path;
 
+    if (req.tool_name === "EnterPlanMode") return allow(); // planning only reads; the plan itself asks
     if (req.tool_name === "ExitPlanMode") {
       this.pending.set(id, { req });
       return this.post({ type: "permission", id, kind: "plan", plan: req.input.plan || "" });
@@ -660,11 +695,6 @@ class Chat {
     if (plan) { input = { ...input, plan }; this.post({ type: "planText", id, plan }); } // "Approved Plan (edited by user)"
     const extra = always && req.permission_suggestions ? { updatedPermissions: req.permission_suggestions } : {};
     this.claude.respond(id, { behavior: "allow", updatedInput: input, ...extra });
-    if (req.tool_name === "ExitPlanMode") {
-      this.p.state.update("mode", "agent");
-      this.syncSettings();
-      this.p.post({ type: "settings", ...this.settings() });
-    }
   }
 
   // Open a proposed plan as a Markdown file; whatever it says when the plan is approved is what Claude builds.
@@ -904,6 +934,31 @@ class ChatProvider {
     return { root, sha, untracked: new Set(status.split("\0").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3))) };
   }
 
+  // "Configure Custom Agents…" in the Mode menu: open an .agent.md, or start a new one in the folder or the user profile.
+  async configureAgents() {
+    const where = (file) => file.startsWith("~/") ? path.join(userAgentDir(), file.slice(2)) : path.join(this.folder, ".github", "agents", file);
+    const picks = [
+      ...this.agents().map((a) => ({ label: a.label, description: a.value.startsWith("agent:~/") ? "user" : "workspace", file: where(a.value.slice(6)) })),
+      { label: "$(add) Create new agent in this folder", dir: this.folder && path.join(this.folder, ".github", "agents") },
+      { label: "$(add) Create new agent in your user profile", dir: userAgentDir() },
+    ].filter((p) => p.file || p.dir);
+    const pick = await vscode.window.showQuickPick(picks, { placeHolder: "Open or create a custom agent" });
+    if (!pick) return;
+    let file = pick.file;
+    if (!file) {
+      const name = (await vscode.window.showInputBox({ prompt: "Agent name", placeHolder: "Reviewer" }))?.trim();
+      if (!name) return;
+      file = path.join(pick.dir, name.replace(/[\\/:*?"<>|]/g, "-") + ".agent.md");
+      if (!fs.existsSync(file)) {
+        fs.mkdirSync(pick.dir, { recursive: true });
+        fs.writeFileSync(file, `---\nname: ${name}\ndescription: What this agent does\ntools: ['read', 'search', 'edit', 'execute']\n---\nInstructions for the agent.\n`);
+        this.agentList = null;
+        this.post({ type: "settings", ...this.settings() });
+      }
+    }
+    await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
+  }
+
   // Everything in the folder changed since the last commit (staged or not, plus new files), in one multi-file diff.
   async diffHead() {
     const dir = this.folder;
@@ -1006,9 +1061,33 @@ class ChatProvider {
     return {
       model: this.state.get("model", "default"),
       effort: this.state.get("effort", ""),
-      mode: this.state.get("mode", "agent"),
+      mode: this.state.get("mode", "agent").replace(/^plan$/, "agent"), // Plan mode is now part of Agent
       policy: this.state.get("policy", vscode.workspace.getConfiguration("bitsmith").get("defaultPolicy")),
+      agents: this.agents().map(({ value, label, description }) => ({ value, label, description })),
     };
+  }
+
+  // Custom agents, as in Copilot Chat: .github/agents/*.agent.md in the folder, then the user profile's, in the Mode picker.
+  agents() {
+    if (this.agentList) return this.agentList;
+    const read = (dir, prefix) => {
+      let files = [];
+      try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".agent.md")).sort(); } catch {}
+      return files.map((f) => parseAgent(prefix + f, fs.readFileSync(path.join(dir, f), "utf8")));
+    };
+    return (this.agentList = [...read(this.folder && path.join(this.folder, ".github", "agents"), ""), ...read(userAgentDir(), "~/")]);
+  }
+
+  // What a mode adds to the CLI's launch: instructions and the tools it may not use. `key` changes when either does.
+  launchAgent(mode) {
+    if (mode === "ask") return { key: "ask", prompt: ASK_PROMPT, disallowed: [...EDIT_TOOLS, "Bash", "EnterPlanMode"] };
+    const a = mode?.startsWith("agent:") && this.agents().find((x) => x.value === mode);
+    if (!a) return { key: "agent", prompt: AGENT_PROMPT };
+    const t = a.tools; // Copilot's tool names; no list means all tools
+    const disallowed = !t ? [] : [...(t.some((x) => x === "edit" || x.startsWith("edit/")) ? [] : EDIT_TOOLS),
+      ...(t.some((x) => ["execute", "execute/runInTerminal", "runCommands", "terminal"].includes(x)) ? [] : ["Bash"])];
+    const prompt = `You are acting as the "${a.label}" agent the user picked. Follow its instructions:\n\n${a.prompt}`;
+    return { key: JSON.stringify([mode, prompt, disallowed]), prompt, disallowed };
   }
 
   resolveWebviewView(view) {
@@ -1144,6 +1223,7 @@ class ChatProvider {
       case "queue": c.queue = m.items || []; return this.saveTabs();
       case "draft": return this.saveDraft(c, m);
       case "diffHead": return this.diffHead();
+      case "configureAgents": return this.configureAgents();
       case "openInEditor": return this.openInEditor(c);
       case "ready":
         this.post({ type: "settings", ...this.settings() });
@@ -1908,6 +1988,7 @@ function describeTool(name, input = {}, rel = (f) => f) {
       return { ...base, icon: "checklist", title: "Updated todos", detail: `${t.filter((x) => x.status === "completed").length}/${t.length} done` };
     }
     case "Skill": return { ...base, icon: "sparkle", title: "Used skill", detail: short(input.skill || input.command, 60) };
+    case "EnterPlanMode": return { ...base, icon: "list-ordered", title: "Planning first", detail: "" };
     case "ExitPlanMode": return { ...base, icon: "list-ordered", title: "Proposed a plan", detail: "" };
     case "AskUserQuestion": return { ...base, icon: "question", title: "Asked a question", detail: "" };
     case "mcp__browser__browser_open": return { ...base, icon: "globe", title: "Opened", detail: short(input.url, 90), full: input.url || "" };
@@ -2232,6 +2313,7 @@ function activate(context) {
       live.length ? showBrowser(live[0]) : vscode.window.showInformationMessage("No chat has the browser open. Turn on Settings → Bitsmith → Browser and ask Claude to open a page.");
     }),
     vscode.commands.registerCommand("bitsmith.diffHead", () => provider.diffHead()),
+    ...agentWatchers(provider),
     vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep([...provider.current().touched])),
     vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo([...provider.current().touched])),
     { dispose: () => provider.shutdown() },
