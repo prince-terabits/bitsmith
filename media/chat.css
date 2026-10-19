@@ -78,7 +78,9 @@ button.small { padding: 1px 8px; min-height: 22px; font-size: 0.92em; }
 .recent-item .time { flex: none; }
 
 /* ---------- turns ---------- */
-.turn { margin-bottom: 18px; animation: fadein .18s ease-out; }
+/* Off-screen turns skip layout and paint, so long chats scroll smoothly; "auto" remembers a turn's real height once
+   seen. flex-shrink: 0 because size-contained flex items would otherwise squash to nothing. */
+.turn { margin-bottom: 18px; animation: fadein .18s ease-out; content-visibility: auto; contain-intrinsic-size: auto 600px; flex-shrink: 0; }
 @keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
 .user-msg { margin-left: 18%; background: var(--vscode-chat-requestBackground, var(--surface)); border: 1px solid var(--vscode-chat-requestBorder, var(--border)); border-radius: 12px 12px 4px 12px; padding: 8px 11px; margin-bottom: 10px; }
 .user-msg .chips { margin-bottom: 6px; }

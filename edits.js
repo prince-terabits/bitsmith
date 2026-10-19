@@ -85,7 +85,8 @@ class EditTracker {
         onDidChangeCodeLenses: this.lensEmitter.event,
         provideCodeLenses: (doc) => this.lenses(doc),
       }),
-      vscode.window.onDidChangeVisibleTextEditors(() => this.decorate()),
+      // A multi-file diff mounts an editor per file as it scrolls: one pass per burst, not per editor.
+      vscode.window.onDidChangeVisibleTextEditors(() => { clearTimeout(this.decoTimer); this.decoTimer = setTimeout(() => this.decorate(), 100); }),
       vscode.workspace.onDidChangeTextDocument((e) => {
         if (this.snapshots.has(e.document.uri.fsPath)) this.refresh();
       }),
@@ -164,6 +165,7 @@ class EditTracker {
 
   decorate() {
     for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.uri.scheme !== "file") continue; // diff sides (original, proposed) share the file's path
       const file = editor.document.uri.fsPath;
       if (!this.snapshots.has(file) || this.binary(file)) { for (const d of [this.added, this.removed, this.was]) editor.setDecorations(d, []); continue; }
       const add = [], del = [], was = [];

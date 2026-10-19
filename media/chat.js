@@ -1575,10 +1575,9 @@ function drawMinimap() {
   const r = pane.getBoundingClientRect();
   Object.assign(minimap.style, { top: r.top + "px", left: r.right - 4 + "px", height: r.height + "px" });
   const ticks = [];
+  // Placed at its turn's top: measuring inside an off-screen turn would force it out of content-visibility skipping.
   const tick = (el, kind, title) => {
-    let at = el; // inside folded steps: where its outermost folded line is
-    for (let d = el.parentElement?.closest("details"); d; d = d.parentElement.closest("details")) if (!d.open && !d.firstElementChild.contains(el)) at = d.firstElementChild;
-    const y = at.getBoundingClientRect().top - r.top + pane.scrollTop;
+    const y = (el.closest(".turn") || el).getBoundingClientRect().top - r.top + pane.scrollTop;
     const t = h("div", { class: `tick ${kind}`, title, onclick: () => reveal(el) });
     t.style.top = (y / pane.scrollHeight) * r.height + "px";
     ticks.push(t);

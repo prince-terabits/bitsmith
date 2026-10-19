@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.17.2
+
+- **Smoother "Changed N files" diff.** Both sides of the reply's multi-file diff are now read-only snapshots, so
+  Keep/Undo lenses and change highlights no longer pop into each file as it scrolls into view and shift the layout.
+- Change highlights are only drawn in real file editors. Before, the "before" side of a diff got the after-hunk
+  highlights too. They're redrawn once per burst when many editors appear at once.
+
+## 1.17.1
+
+- **Smoother scrolling in long chats.** Turns off screen are skipped for layout and paint (`content-visibility: auto`),
+  so a 300-turn chat drops about half as many frames while scrolling and opens about 4× faster. Minimap ticks now sit at the top of
+  their turn, so drawing them doesn't lay out every off-screen turn.
+
 ## 1.17.0
 
 - **Open Chat in Terminal.** A terminal button in the chat's title bar (sidebar and editor tab) resumes the same chat

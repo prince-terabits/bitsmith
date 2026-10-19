@@ -789,7 +789,8 @@ class Chat {
       const before = at >= 0 && this.checkpoints[at].snaps.has(file) ? this.checkpoints[at].snaps.get(file)
         : stepBefore(steps.map((s) => ({ ...s, before: this.befores.get(s.id) })), after);
       if (Buffer.isBuffer(before) || Buffer.isBuffer(after) || before === undefined) continue; // binary, or can't be worked out
-      res.push([vscode.Uri.file(file), doc(file, "before", before ?? ""), later ? doc(file, "after", after ?? "") : vscode.Uri.file(file)]);
+      // Both sides virtual: the real file would get Keep/Undo lenses and highlights in every pane, which jolt the layout while scrolling.
+      res.push([vscode.Uri.file(file), doc(file, "before", before ?? ""), doc(file, "after", after ?? "")]);
     }
     if (!res.length) return vscode.window.showInformationMessage("Can't show this reply's changes: the files have changed too much since.");
     if (res.length === 1) return vscode.commands.executeCommand("vscode.diff", res[0][1], res[0][2], `${path.basename(res[0][0].fsPath)} (this reply's changes)`, { preview: true });
