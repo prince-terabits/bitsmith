@@ -724,6 +724,7 @@ class Chat {
     this.redoStack = [];
     this.post({ type: "clear" });
     this.edits.refresh(); // its unreviewed changes from before a reload come back
+    this.p.postDraft(this); // and its unsent message
     this.updateTitle();
     this.post({ type: "loading", title: this.title });
     const load = (this.loads = (this.loads || 0) + 1);
@@ -778,11 +779,7 @@ class Chat {
   // Everything one reply changed, in one multi-file diff: each file as it was before the reply against how it was after.
   turnDiff({ checkpoint, files }) {
     const at = this.checkpoints.findIndex((c) => c.id === checkpoint);
-    const doc = (file, side, text) => {
-      const uri = vscode.Uri.from({ scheme: PROPOSED, path: file, query: `${side}-${Math.random().toString(36).slice(2)}` });
-      proposed.set(uri.toString(), text);
-      return uri;
-    };
+    const doc = virtualDoc;
     const res = [];
     for (const { file, steps } of files || []) {
       const later = at < 0 ? undefined : this.checkpoints.slice(at + 1).find((c) => c.snaps.has(file));
@@ -857,6 +854,23 @@ class ChatProvider {
     });
   }
 
+  // A chat's unsent message, kept across reloads: by session id, or "new" for the sidebar's not-yet-started chat.
+  draftKey(c) { return c.sessionId || (!c.panel && c === this.active ? "new" : null); }
+
+  saveDraft(c, { text, items, images }) {
+    const key = this.draftKey(c);
+    if (!key) return;
+    const drafts = { ...this.ws.get("drafts") };
+    if (text?.trim() || items?.length || images?.length) drafts[key] = { text, items, images };
+    else delete drafts[key];
+    this.ws.update("drafts", drafts);
+  }
+
+  postDraft(c) {
+    const d = this.ws.get("drafts")?.[this.draftKey(c)];
+    if (d) c.post({ type: "draft", ...d });
+  }
+
   saveEdits() {
     const owners = {};
     for (const f of this.edits.snapshots.keys()) owners[f] = [...this.chats.values()].find((c) => c.sessionId && c.touched.has(f))?.sessionId || this.editOwners[f] || null;
@@ -888,6 +902,30 @@ class ChatProvider {
     const status = await git(root, ["status", "--porcelain", "-z", "-uall"]);
     if (!sha || status == null) return null;
     return { root, sha, untracked: new Set(status.split("\0").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3))) };
+  }
+
+  // Everything in the folder changed since the last commit (staged or not, plus new files), in one multi-file diff.
+  async diffHead() {
+    const dir = this.folder;
+    const list = dir && (await git(dir, ["diff", "HEAD", "--name-status", "--no-renames", "--relative", "-z"]));
+    if (list == null) return vscode.window.showInformationMessage("Can't compare: this folder isn't in a git repository with a commit.");
+    const p = list.split("\0").filter(Boolean), changed = [];
+    for (let i = 0; i + 1 < p.length; i += 2) changed.push([p[i], p[i + 1]]);
+    for (const rel of ((await git(dir, ["ls-files", "--others", "--exclude-standard", "-z"])) || "").split("\0").filter(Boolean)) changed.push(["A", rel]);
+    if (!changed.length) return vscode.window.showInformationMessage("No changes since the last commit.");
+    const MAX = 200; // ponytail: one diff of the first 200 files; page it if a bigger working tree matters
+    const res = [];
+    for (const [status, rel] of changed.slice(0, MAX)) {
+      const file = path.join(dir, rel);
+      const before = status === "A" ? Buffer.alloc(0) : (await git(dir, ["show", `HEAD:./${rel}`], true)) || Buffer.alloc(0);
+      const after = status === "D" ? Buffer.alloc(0) : (() => { try { return fs.readFileSync(file); } catch { return Buffer.alloc(0); } })();
+      if (isBinary(before) || isBinary(after)) continue;
+      res.push([vscode.Uri.file(file), virtualDoc(file, "head", before.toString("utf8")), virtualDoc(file, "now", after.toString("utf8"))]);
+    }
+    if (changed.length > MAX) vscode.window.showInformationMessage(`Showing the first ${MAX} of ${changed.length} changed files.`);
+    if (!res.length) return vscode.window.showInformationMessage("Only binary files changed since the last commit.");
+    vscode.commands.executeCommand("vscode.changes", "Bitsmith: changes since last commit", res)
+      .then(undefined, () => vscode.commands.executeCommand("vscode.diff", res[0][1], res[0][2])); // older VS Code: the first file
   }
 
   async repoRoot(dir) {
@@ -1104,6 +1142,8 @@ class ChatProvider {
     if (from && m.type === "history") return this.history(from);
     switch (m.type) {
       case "queue": c.queue = m.items || []; return this.saveTabs();
+      case "draft": return this.saveDraft(c, m);
+      case "diffHead": return this.diffHead();
       case "openInEditor": return this.openInEditor(c);
       case "ready":
         this.post({ type: "settings", ...this.settings() });
@@ -1115,6 +1155,7 @@ class ChatProvider {
         this.postSessions();
         this.edits.refresh();
         this.restoreTabs();
+        if (!this.active.sessionId) this.postDraft(this.active);
         this.active.ensure(); // warm start: fetches models and slash commands
         break;
       case "fileSearch": return this.post({ type: "fileResults", q: m.q, items: await this.searchFiles(m.q) });
@@ -1654,6 +1695,13 @@ function readText(file) {
   try { return fs.readFileSync(file, "utf8"); } catch { return null; }
 }
 
+// A read-only copy of `text` for one side of a diff, named like `file` so it gets its language.
+function virtualDoc(file, side, text) {
+  const uri = vscode.Uri.from({ scheme: PROPOSED, path: file, query: `${side}-${Math.random().toString(36).slice(2)}` });
+  proposed.set(uri.toString(), text);
+  return uri;
+}
+
 // A file's text before these edit steps (oldest first), worked back from its text now. null: it didn't exist yet;
 // undefined: can't tell, because the file has moved on or the edit is ambiguous to reverse. A Write step needs
 // `before`, what the file held when it ran.
@@ -1682,11 +1730,7 @@ function showStepDiff(step) {
   const file = input?.file_path;
   if (!file) return;
   const b = stepBefore([step], readText(file)), before = b === null ? "" : b ?? null; // a created file: empty on the left
-  const doc = (side, text) => {
-    const uri = vscode.Uri.from({ scheme: PROPOSED, path: file, query: `${side}-${Math.random().toString(36).slice(2)}` });
-    proposed.set(uri.toString(), text);
-    return uri;
-  };
+  const doc = (side, text) => virtualDoc(file, side, text);
   const edits = name === "Write" ? [{ old_string: "", new_string: input.content }] : name === "MultiEdit" ? input.edits : [input];
   const [left, right] = before != null ? [doc("before", before), vscode.Uri.file(file)]
     : [doc("before", edits.map((e) => e.old_string).join("\n⋯\n")), doc("after", edits.map((e) => e.new_string).join("\n⋯\n"))];
@@ -2187,6 +2231,7 @@ function activate(context) {
       const live = [provider.active, ...provider.chats.values()].map((c) => c.claude?.browserState).filter((f) => f && fs.existsSync(f));
       live.length ? showBrowser(live[0]) : vscode.window.showInformationMessage("No chat has the browser open. Turn on Settings → Bitsmith → Browser and ask Claude to open a page.");
     }),
+    vscode.commands.registerCommand("bitsmith.diffHead", () => provider.diffHead()),
     vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep([...provider.current().touched])),
     vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo([...provider.current().touched])),
     { dispose: () => provider.shutdown() },

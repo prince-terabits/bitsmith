@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.20.0
+
+- **Unsent message survives a reload.** Text, attached files and pasted images in the message box come back after
+  Reload Window, per chat (including a new chat not sent yet). Sending or clearing it forgets it.
+- **Agent changes in Source Control.** While there are files to review, a "Bitsmith" entry in the Source Control view
+  lists them; click a file for its diff, inline ✓ / ↶ to Keep or Undo it, or on the group header for all of them.
+- **Alt+↑ / Alt+↓** jump to the previous / next message you sent.
+- **Compare with Last Commit** (sidebar ⋯ menu, a tab's More menu, or the command palette): everything in the folder
+  changed since the last commit, including new files, in one multi-file diff (first 200 files).
+
 ## 1.19.1
 
 - **Keep / Undo survives a window reload.** Unreviewed agent changes (the green/red highlights, Keep/Undo lenses and

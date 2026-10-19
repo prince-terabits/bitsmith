@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.19.1",
+  "version": "1.20.0",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -126,6 +126,24 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "bitsmith.diffHead",
+        "title": "Compare with Last Commit",
+        "category": "Bitsmith",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "bitsmith.scmKeep",
+        "title": "Keep",
+        "category": "Bitsmith",
+        "icon": "$(check)"
+      },
+      {
+        "command": "bitsmith.scmUndo",
+        "title": "Undo",
+        "category": "Bitsmith",
+        "icon": "$(discard)"
+      },
+      {
         "command": "bitsmith.renameChat",
         "title": "Rename Chat",
         "category": "Bitsmith",
@@ -179,6 +197,35 @@
           "command": "bitsmith.deleteChat",
           "when": "view == bitsmith.chat",
           "group": "bitsmith@1"
+        },
+        {
+          "command": "bitsmith.diffHead",
+          "when": "view == bitsmith.chat",
+          "group": "bitsmith@3"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "bitsmith.scmKeep",
+          "when": "scmProvider == bitsmith",
+          "group": "inline"
+        },
+        {
+          "command": "bitsmith.scmUndo",
+          "when": "scmProvider == bitsmith",
+          "group": "inline"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "bitsmith.scmKeep",
+          "when": "scmProvider == bitsmith",
+          "group": "inline"
+        },
+        {
+          "command": "bitsmith.scmUndo",
+          "when": "scmProvider == bitsmith",
+          "group": "inline"
         }
       ],
       "editor/title": [
@@ -216,6 +263,14 @@
       "commandPalette": [
         {
           "command": "bitsmith.addToChat",
+          "when": "false"
+        },
+        {
+          "command": "bitsmith.scmKeep",
+          "when": "false"
+        },
+        {
+          "command": "bitsmith.scmUndo",
           "when": "false"
         }
       ]

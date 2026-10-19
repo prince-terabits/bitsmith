@@ -123,6 +123,7 @@ const MORE = [
   { value: "renameChat", label: "Rename", icon: "edit" },
   { value: "usage", label: "Plan usage", icon: "pulse" },
   { value: "exportChat", label: "Export as Markdown", icon: "export" },
+  { value: "diffHead", label: "Compare with last commit", icon: "git-compare" },
   { value: "deleteChat", label: "Delete", icon: "trash" },
 ];
 const moreBtn = h("button", { class: "icon-btn", title: "More", onclick: () => menu(moreBtn, null, MORE, null, (v) => {
@@ -242,6 +243,21 @@ function renderChips() {
   S.items.forEach((it, i) => kids.push(chip(it, { onRemove: () => { S.items.splice(i, 1); renderChips(); } })));
   S.images.forEach((img, i) => kids.push(imageChip(img, i + 1, () => { S.images.splice(i, 1); hidePreview(); renderChips(); })));
   chips.replaceChildren(...kids);
+  saveDraft();
+}
+
+// The unsent message (text, files, images) survives a window reload: the extension keeps it per chat.
+let draftTimer;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    if (!synced || !shown) return;
+    const d = shown.editing?.prev || { text: input.value, items: S.items, images: S.images }; // not the message being edited
+    const msg = { text: d.text, items: d.items, images: d.images.map(({ mediaType, data }) => ({ mediaType, data })) };
+    const json = JSON.stringify(msg);
+    if (json !== shown.savedDraft) vscode.postMessage({ chat: shown.key, type: "draft", ...msg });
+    shown.savedDraft = json;
+  }, 500);
 }
 
 function addItems(items) {
@@ -342,7 +358,7 @@ function renderMention() {
     icon("file"), h("div", { class: "menu-text ellipsis" }, h("span", {}, base(f.rel)), h("span", { class: "muted small" }, "  " + dir(f.rel))))));
 }
 
-input.addEventListener("input", () => { autosize(); slashIndex = 0; updateMention(); renderSlash(); });
+input.addEventListener("input", () => { autosize(); slashIndex = 0; updateMention(); renderSlash(); saveDraft(); });
 input.addEventListener("keydown", (e) => {
   if (e.isComposing || e.keyCode === 229) return; // an IME is composing: its Enter/arrows/Tab belong to it
   if (mention?.items.length) {
@@ -1476,6 +1492,12 @@ function handle(m) {
       return fillOlder(cur);
     }
     case "tabState": return vscode.setState({ ...vscode.getState(), sessionId: m.sessionId }); // an editor tab reopens this chat after a reload
+    case "draft": { // the unsent message from before a reload; never over something typed since
+      const images = (m.images || []).map((i) => ({ ...i, url: `data:${i.mediaType};base64,${i.data}` }));
+      if (cur !== shown) { if (!cur.draft.text && !cur.draft.images.length) cur.draft = { ...cur.draft, text: m.text || "", items: m.items || [], images }; }
+      else if (!input.value && !S.images.length) fillComposer(m.text || "", m.items || [], images);
+      return;
+    }
     case "clear":
       cur.loading = false;
       cur.more = cur.olderPending = false;
@@ -1606,6 +1628,14 @@ findInput.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
+  // Alt+↑ / Alt+↓: to the previous / next message you sent
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && shown) {
+    e.preventDefault();
+    const el = shown.el, top = el.getBoundingClientRect().top + 8, turns = [...el.querySelectorAll(".turn")];
+    const t = e.key === "ArrowUp" ? turns.findLast((x) => x.getBoundingClientRect().top < top - 4) : turns.find((x) => x.getBoundingClientRect().top > top + 4);
+    if (t) el.scrollTop += t.getBoundingClientRect().top - top;
+    else if (e.key === "ArrowUp") el.scrollTop = 0; // the first one, or older messages still to load
+  }
 });
 
 // ---------- minimap: ticks beside the scrollbar for messages, edits, errors and questions; a click jumps there ----------

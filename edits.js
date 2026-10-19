@@ -43,6 +43,9 @@ const lines = (text) => (text === "" ? [] : text.split("\n"));
 const isBinary = (buf) => buf.subarray(0, 8000).includes(0);
 const readSnapshot = (buf) => (isBinary(buf) ? buf : buf.toString("utf8"));
 
+// SCM menu arguments -> paths: resource states (one, or the selection), or a whole group.
+const scmFiles = (args) => args.flat().flatMap((x) => x?.resourceStates || [x]).filter((x) => x?.resourceUri).map((x) => x.resourceUri.fsPath);
+
 function stats(hunks) {
   let added = 0, removed = 0;
   for (const h of hunks) { added += h.nEnd - h.nStart; removed += h.oEnd - h.oStart; }
@@ -95,7 +98,26 @@ class EditTracker {
       vscode.commands.registerCommand("bitsmith.keepHunk", (file, h) => this.keepHunk(file, h)),
       vscode.commands.registerCommand("bitsmith.undoHunk", (file, h) => this.undoHunk(file, h)),
       vscode.commands.registerCommand("bitsmith.diffFile", (file) => this.showDiff(file)),
+      // Source Control view: a row's or a group's inline Keep / Undo, for the clicked or selected rows
+      vscode.commands.registerCommand("bitsmith.scmKeep", (...a) => this.keep(scmFiles(a))),
+      vscode.commands.registerCommand("bitsmith.scmUndo", (...a) => this.undo(scmFiles(a))),
+      { dispose: () => this.sc?.dispose() },
     );
+  }
+
+  // The files waiting for Keep / Undo also show in the Source Control view, while there are any.
+  showInScm(files) {
+    if (!files.length) { this.sc?.dispose(); this.sc = null; return; }
+    if (!this.sc) {
+      this.sc = vscode.scm.createSourceControl("bitsmith", "Bitsmith");
+      this.group = this.sc.createResourceGroup("changes", "Agent changes");
+    }
+    this.sc.count = files.length;
+    this.group.resourceStates = files.map((f) => ({
+      resourceUri: vscode.Uri.file(f.file),
+      command: { title: "Show changes", command: "bitsmith.diffFile", arguments: [f.file] },
+      decorations: { strikeThrough: f.deleted, tooltip: f.created ? "Created by Bitsmith" : f.deleted ? "Deleted by Bitsmith" : f.binary ? "Changed by Bitsmith" : `Changed by Bitsmith: +${f.added} -${f.removed}` },
+    }));
   }
 
   // Call before the agent writes a file; the first snapshot wins until kept or undone.
@@ -168,7 +190,9 @@ class EditTracker {
     this.timer = setTimeout(() => {
       this.decorate();
       this.lensEmitter.fire();
-      this.onChange(this.files());
+      const files = this.files();
+      this.showInScm(files);
+      this.onChange(files);
     }, 100);
   }
 

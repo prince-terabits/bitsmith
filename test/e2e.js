@@ -43,10 +43,11 @@ const vscode = {
     onDidChangeActiveTextEditor: noop, onDidChangeTextEditorSelection: noop, onDidChangeVisibleTextEditors: noop,
   },
   languages: { registerCodeLensProvider: noop },
-  commands: { registerCommand: noop, executeCommand: (...a) => commands.push(a) },
+  scm: { createSourceControl: () => (scm = { group: {}, createResourceGroup() { return this.group; }, dispose() { scm = null; } }) },
+  commands: { registerCommand: noop, executeCommand: async (...a) => { commands.push(a); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
-let provider, tree, statusItem, serializer;
+let provider, tree, statusItem, serializer, scm;
 global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
@@ -599,9 +600,34 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     provider.edits.refresh();
     await new Promise((r) => setTimeout(r, 200));
     assert(provider.active.touched.has(f), "back in its chat's changed files");
+    assert.deepStrictEqual(scm?.group.resourceStates.map((s) => s.resourceUri.fsPath), [f], "listed in Source Control");
     await provider.edits.undo([f]);
     assert.strictEqual(fs.readFileSync(f, "utf8"), "old\n", "Undo still works after the reload");
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(scm, null, "Source Control entry goes away when nothing is left to review");
     console.log("pending edits survive reload ok");
+
+    // the unsent message survives a reload too
+    provider.onWebview({ chat: provider.active.key, type: "draft", text: "half typed", items: [], images: [{ mediaType: "image/png", data: "AA==" }] });
+    provider.view = { webview: { postMessage: (m) => posts.push(m) } };
+    const st6 = posts.length;
+    provider.active.loadSession(provider.active.sessionId);
+    const d = posts.slice(st6).find((m) => m.type === "draft");
+    assert(d && d.text === "half typed" && d.images.length === 1, "draft comes back with its chat");
+    provider.onWebview({ chat: provider.active.key, type: "draft", text: "", items: [], images: [] });
+    assert(!provider.ws.get("drafts")[provider.active.sessionId], "sent or cleared: draft forgotten");
+    console.log("draft survives reload ok");
+
+    // compare with last commit: modified and new files, nothing else
+    const { execSync } = require("child_process");
+    execSync("git init -q && git add a.txt && git -c user.email=t@t -c user.name=t commit -qm init", { cwd });
+    fs.writeFileSync("a.txt", "changed\n");
+    commands.length = 0;
+    await provider.diffHead();
+    const [, , res] = commands.find((c) => c[0] === "vscode.changes") || [];
+    const names = res.map((r) => path.basename(r[0].fsPath)).sort();
+    assert(names.includes("a.txt") && names.includes("b.txt"), names.join()); // a.txt modified, b.txt never committed
+    console.log("compare with last commit ok:", names.join(", "));
     process.exit(0);
   }
 
