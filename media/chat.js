@@ -114,7 +114,7 @@ const box = h("div", { class: "box" },
   h("div", { class: "toolbar" }, modeBtn, modelBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
 );
 const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
-  h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "VS Code only lets panels like this one receive drops while Shift is held" }, "/ for commands · hold Shift to drop files")));
+  h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "Start dragging, then press and hold Shift until you drop: VS Code only lets panels like this one receive drops while Shift is held. Or right-click files in the Explorer → Add to Bitsmith Chat." }, "/ for commands · hold Shift to drop files")));
 // In an editor tab VS Code's title bar is far away, so the tab gets its own header: title, history, new chat, more.
 const inTab = "tab" in document.body.dataset;
 const headTitle = h("span", { class: "ellipsis head-title", title: "Double-click to rename", ondblclick: () => send({ type: "renameChat" }) }, "New chat");
@@ -269,16 +269,17 @@ policyBtn.onclick = () => menu(policyBtn, "Approvals", POLICIES, S.policy, (v) =
 const kindIcon = (k) => (k === "folder" ? "folder" : k === "selection" ? "list-selection" : "file");
 function chip(item, { onRemove, suggested, onToggle, off } = {}) {
   const label = base(item.rel) + (item.range ? `:${item.range}` : "");
-  return h("span", { class: `chip ${suggested ? "suggested" : ""} ${off ? "off" : ""}`, title: item.rel + (suggested ? " · current file, click the eye to include or exclude it" : "") },
-    h("span", { class: "chip-main", onclick: () => send({ type: "open", file: item.file || item.rel }) }, icon(kindIcon(item.kind)), label),
+  return h("span", { class: `chip ${suggested ? "suggested" : ""} ${off ? "off" : ""}`, title: item.rel + (suggested ? " · current file: click to attach it, the eye includes or excludes it" : "") },
+    h("span", { class: "chip-main", onclick: () => send(suggested ? { type: "pinActive" } : { type: "open", file: item.file || item.rel }) }, icon(kindIcon(item.kind)), label),
     onToggle && h("button", { class: "icon-btn", title: off ? "Include current file" : "Exclude current file", onclick: onToggle }, icon(off ? "eye-closed" : "eye")),
     onRemove && h("button", { class: "icon-btn", title: "Remove", onclick: onRemove }, icon("close")));
 }
 
-// The current file already attached as a chip (dropped, picked or right-clicked) shows once, as the attachment.
+// The current file (or its selection) already attached as a chip (dropped, picked, clicked or right-clicked) shows once, as the attachment.
 function activeIsAttached() {
   const a = S.active;
-  return !!a && !a.selection && S.items.some((i) => i.kind === "file" && (i.file === a.file || i.rel === a.rel));
+  if (a?.selection) return S.items.some((i) => i.kind === "selection" && i.file === a.file && i.start === a.selection.start && i.end === a.selection.end);
+  return !!a && S.items.some((i) => i.kind === "file" && (i.file === a.file || i.rel === a.rel));
 }
 
 function renderChips() {

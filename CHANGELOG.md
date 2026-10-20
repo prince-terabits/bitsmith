@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.27.5
+
+- **Fix:** a chat that was also open in the terminal (resumed from the same conversation) disappeared from Recent and
+  History after a reload: the terminal's newer file hid it as an old copy. A file now only counts as an old copy
+  (Retry / Restore / Edit) if it stopped changing before the newer one was created, so both branches are listed.
+
+## 1.27.4
+
+- **Removed the "Drop Files" panel** that 1.27.3 added under the chat. To drop files or folders into the chat, start
+  dragging, then hold Shift until you drop (VS Code only lets panels like this one take drops with Shift held), or
+  right-click them in the Explorer → **Add to Bitsmith Chat**.
+
+## 1.27.2
+
+- **Pin the current file:** click the italic current-file chip to attach it for good (its selected lines if there's a
+  selection, otherwise the whole file). It then stays attached when you switch files, and the italic chip no longer
+  shows it twice.
+
 ## 1.27.1
 
 - **Fix:** after restoring a checkpoint, a file the agent had created stayed in "N files changed" if its tab was still

@@ -1390,6 +1390,10 @@ class ChatProvider {
       case "showProposed": return c.showProposed(m.id);
       case "setting": return this.setSetting(m.key, m.value, c);
       case "pickContext": return this.pickContext(c);
+      case "pinActive": { // the current-file chip clicked: attach it (its selection, if any) for good
+        const a = this.activeFile();
+        return a && this.addItems([a.selection ? { kind: "selection", file: a.file, rel: a.rel, ...a.selection } : { kind: "file", file: a.file, rel: a.rel }], c);
+      }
       case "drop": return this.addUris(m.uris.map((u) => vscode.Uri.parse(u)), c);
       case "pastePaths": return this.pastePaths(m.paths, c, m.raw);
       case "keep": return this.edits.keep(m.file || [...c.touched]); // no file: everything this chat changed
@@ -1807,7 +1811,7 @@ class ChatProvider {
     let files = [];
     try { files = fs.readdirSync(this.sessionDir()).filter((f) => f.endsWith(".jsonl")); } catch {}
     return latestCopies(files
-      .map((f) => { const file = path.join(this.sessionDir(), f); try { return { id: f.slice(0, -6), file, time: fs.statSync(file).mtimeMs }; } catch { return null; } })
+      .map((f) => { const file = path.join(this.sessionDir(), f); try { const st = fs.statSync(file); return { id: f.slice(0, -6), file, time: st.mtimeMs, born: st.birthtimeMs }; } catch { return null; } })
       .filter(Boolean)
       .sort((a, b) => b.time - a.time))
       .slice(0, limit)
@@ -2244,16 +2248,19 @@ function parseUserText(raw) {
 
 // One chat can span several session files: Retry, Restore and Edit fork a copy (same first prompt), and a chat
 // continued after compaction starts a new file whose summary names the previous one ("…transcript at: <id>.jsonl").
-// Given newest first, keeps only the newest file of each chat.
+// Given newest first, keeps only the newest file of each chat. A file with the same first prompt is only a copy if it
+// stopped changing before a newer one was created (the chat moved on to the fork); two branches both still written
+// after the split, like the same conversation carried on in the terminal and in Bitsmith, are both kept.
 // ponytail: only the first 64 KB is read, so a first prompt longer than that (a pasted image) isn't matched.
 function latestCopies(list) {
   const firstPrompt = (file) => { try { return readLines(file, 0, 65536).map(parse).find((e) => e && ((e.isCompactSummary && typeof e.message?.content === "string") || userText(e))); } catch {} };
   const withFirst = list.map((s) => [s, firstPrompt(s.file)]);
   const older = new Set(withFirst.map(([, f]) => f?.isCompactSummary && f.message.content.match(/transcript at: \S*?([0-9a-f-]{36})\.jsonl/)?.[1]));
-  const firsts = new Set();
+  const born = new Map(); // first prompt -> creation times of the newer files (0: the filesystem has none, so any is a copy)
   return withFirst.filter(([s, f]) => {
-    const copy = older.has(s.id) || (f?.uuid && firsts.has(f.uuid));
-    if (f?.uuid) firsts.add(f.uuid);
+    const newer = born.get(f?.uuid) || [];
+    const copy = older.has(s.id) || newer.some((b) => !b || b >= s.time - 5000);
+    if (f?.uuid) born.set(f.uuid, [...newer, s.born || 0]);
     return !copy;
   }).map(([s]) => s);
 }

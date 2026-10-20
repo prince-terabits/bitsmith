@@ -206,7 +206,12 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     write(ids[3], line({ uuid: "u4", message: { content: "another chat" } }), 500);
     const listed = provider.sessions(60).map((s) => s.id).filter((id) => ids.includes(id));
     assert.deepStrictEqual(listed, [ids[2], ids[3]], "one entry per chat: " + listed);
-    for (const id of ids) fs.rmSync(path.join(dir, id + ".jsonl"));
+    // the same chat carried on in the terminal and in Bitsmith: the older file was still written after the newer one began
+    const now = Date.now() / 1000, br = ["e", "f"].map((x) => `${x.repeat(8)}-2222-3333-4444-555555555555`);
+    write(br[0], line({ uuid: "u5", message: { content: "branch me" } }), now + 100);
+    write(br[1], line({ uuid: "u5", message: { content: "branch me" } }), now + 50);
+    assert.deepStrictEqual(provider.sessions(60).map((s) => s.id).filter((id) => br.includes(id)), br, "both branches listed");
+    for (const id of [...ids, ...br]) fs.rmSync(path.join(dir, id + ".jsonl"));
     console.log("history dedupe ok");
   }
 
@@ -784,6 +789,16 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     q = await waitFor((m) => m.type === "quickAction", st10);
     assert.strictEqual(q.text, "Apply this code to `b.txt`:\n\n```py\nx = 1\n```");
     console.log("insert and apply code ok");
+
+    // clicking the current-file chip attaches it: its selection if there is one, else the file
+    const st11 = posts.length;
+    vscode.window.activeTextEditor = { document: qdoc, selection: { isEmpty: false, start: { line: 1 }, end: { line: 2 } } };
+    await provider.onWebview({ type: "pinActive" });
+    vscode.window.activeTextEditor.selection = { isEmpty: true };
+    await provider.onWebview({ type: "pinActive" });
+    const pins = posts.slice(st11).filter((m) => m.type === "addContext").map((m) => m.items[0]);
+    assert.deepStrictEqual(pins.map((p) => [p.kind, p.rel, p.start, p.end]), [["selection", "b.txt", 2, 3], ["file", "b.txt", undefined, undefined]]);
+    console.log("pin current file ok");
 
     // next / previous change: through the hunks from the cursor, wrapping around
     const cf = path.join(cwd, "c.txt");
