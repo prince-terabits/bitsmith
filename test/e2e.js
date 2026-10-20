@@ -38,7 +38,7 @@ const vscode = {
   window: {
     activeTextEditor: null, visibleTextEditors: [], tabGroups: { all: [] },
     createTextEditorDecorationType: () => ({ dispose() {} }),
-    createStatusBarItem: () => (statusItem = { show() {}, dispose() {} }),
+    createStatusBarItem: (id) => { const it = { show() { it.shown = true; }, hide() { it.shown = false; }, dispose() {} }; return id === "bitsmith.work" ? (workItem = it) : (statusItem = it); },
     registerWebviewViewProvider: (_, p) => { provider = p; return noop(); },
     registerWebviewPanelSerializer: (_, s) => { serializer = s; return noop(); },
     createTreeView: (_, o) => { tree = o.treeDataProvider; return noop(); }, showWarningMessage: async () => undefined,
@@ -49,7 +49,7 @@ const vscode = {
   commands: { registerCommand: noop, executeCommand: async (...a) => { commands.push(a); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
-let provider, tree, statusItem, serializer, scm;
+let provider, tree, statusItem, workItem, serializer, scm;
 global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
@@ -61,6 +61,10 @@ assert.deepStrictEqual(diffLines(["a", "b", "c"], ["a", "x", "c"]), [{ oStart: 1
 assert.deepStrictEqual(diffLines(["a", "c"], ["a", "b", "c"]), [{ oStart: 1, oEnd: 1, nStart: 1, nEnd: 2 }]);
 assert.deepStrictEqual(diffLines(["a", "b", "c"], ["a", "c"]), [{ oStart: 1, oEnd: 2, nStart: 1, nEnd: 1 }]);
 assert.strictEqual(diffLines(lines("1\n2\n3\n4\n5"), lines("1\nX\n3\n4\nY")).length, 2);
+{ // a big file edited at its top and bottom: two small hunks, not the whole file
+  const big = Array.from({ length: 5000 }, (_, i) => `line ${i}`), edited = ["new", ...big.slice(1, -1), "end"];
+  assert.deepStrictEqual(diffLines(big, edited).map((h) => [h.oEnd - h.oStart, h.nEnd - h.nStart]), [[1, 1], [1, 1]]);
+}
 assert.deepStrictEqual(ext.editStats("Edit", { old_string: "a\nb", new_string: "a\nc\nd" }), { added: 2, removed: 1 });
 // diff rows: 2 lines of context around each hunk, a gap between far-apart hunks and between edits
 assert.deepStrictEqual(ext.diffRows("Edit", { old_string: "1\n2\n3\n4\n5\n6\n7\n8\n9", new_string: "1\nX\n3\n4\n5\n6\n7\nY\n9" }).map((r) => r.k + r.t).join(","),
@@ -96,6 +100,26 @@ assert.strictEqual(ext.diffRows("Write", { content: "x\n".repeat(500) }, 400).at
   fs.writeFileSync(fork, jsonl([boundary, summary, say("u3", "s", "user", "third"), say("a3", "u3", "assistant", "three")]));
   const items = ext.replay(fork, (f) => f).filter((x) => x.type === "user" || x.type === "notice").map((x) => x.type === "user" ? x.text : "notice");
   assert.deepStrictEqual(items, ["first", "second", "notice", "third"], "history before the compaction comes back");
+  fs.rmSync(dir, { recursive: true });
+}
+// Claude's task tools become the Todos panel's checklist, with no step cards of their own
+{
+  const dir = fs.mkdtempSync(path.join(require("os").tmpdir(), "bs-task-")), file = path.join(dir, "t.jsonl");
+  let n = 0;
+  const call = (name, input, out) => {
+    const id = `t${++n}`, a = `a${n}`, u = `r${n}`;
+    return [{ uuid: a, parentUuid: n > 1 ? `r${n - 1}` : "u0", type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } },
+      { uuid: u, parentUuid: a, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: out }] } }];
+  };
+  const es = [{ uuid: "u0", parentUuid: null, type: "user", message: { role: "user", content: "go" } },
+    ...call("TaskCreate", { subject: "Add model", description: "x", activeForm: "Adding model" }, "Task #1 created successfully: Add model"),
+    ...call("TaskCreate", { subject: "Add view", description: "y" }, "Task #2 created successfully: Add view"),
+    ...call("TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status"),
+    ...call("TaskUpdate", { taskId: "2", status: "in_progress" }, "Updated task #2 status")];
+  fs.writeFileSync(file, es.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  const items = ext.replay(file, (f) => f);
+  assert(!items.some((x) => x.type === "tool"), "no step cards for task tools");
+  assert.deepStrictEqual(items.filter((x) => x.type === "todos").pop().todos.map((t) => `${t.id}:${t.content}:${t.status}`), ["1:Add model:completed", "2:Add view:in_progress"]);
   fs.rmSync(dir, { recursive: true });
 }
 const parsed = ext.parseUserText("<context>\nCurrent file: src/x.ts (lines 3-5 selected)\n```\ncode\n```\nAttached:\n- src/lib/ (folder)\n- a.txt (file)\n</context>\n\nfix it");
@@ -652,6 +676,31 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert.deepStrictEqual(provider.launchAgent("agent:Builder.agent.md").disallowed, []);
     assert(provider.launchAgent("ask").disallowed.includes("Write") && /EnterPlanMode/.test(provider.launchAgent("agent").prompt), "Ask is read-only, Agent plans big tasks");
     console.log("ask mode and custom agents ok");
+
+    // each chat keeps its own model, effort and mode; new chats start from the last picked
+    const one = provider.active;
+    provider.setSetting("model", "opus", one);
+    provider.setSetting("mode", "ask", one);
+    const two = provider.createChat();
+    two.ensure = () => {}; // no CLI for this check
+    provider.setSetting("model", "haiku", two);
+    assert.deepStrictEqual([one.settings().model, one.settings().mode, two.settings().model, two.settings().mode], ["opus", "ask", "haiku", "ask"]);
+    one._prefs = null; // reopened later: its picks come back from storage
+    assert.strictEqual(one.settings().model, "opus", "per-chat model survives");
+    const st7 = posts.length;
+    provider.switchTo(two);
+    assert.strictEqual(posts.slice(st7).find((m) => m.type === "settings")?.model, "haiku", "switching shows that chat's picks");
+    console.log("per-chat model and mode ok");
+
+    // status bar: working, then needs approval, then gone
+    two.busy = true;
+    assert(workItem.shown && /Working/.test(workItem.text), workItem.text);
+    two.pending.set("r1", {});
+    assert(/Needs approval/.test(workItem.text) && provider.workChat === two, workItem.text);
+    two.pending.clear();
+    two.busy = false;
+    assert(!workItem.shown, "hidden when idle");
+    console.log("status bar activity ok");
     process.exit(0);
   }
 

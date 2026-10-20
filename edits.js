@@ -18,22 +18,49 @@ function diffLines(a, b) {
   while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
   const A = a.slice(pre, a.length - suf), B = b.slice(pre, b.length - suf);
   if (!A.length && !B.length) return [];
-  // ponytail: plain LCS table on the changed middle; past ~4M cells the middle is one big hunk. Myers diff if that bites.
-  if (A.length * B.length > 4e6) return [{ oStart: pre, oEnd: pre + A.length, nStart: pre, nEnd: pre + B.length }];
-  const n = A.length, m = B.length;
-  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const ops = myers(A, B);
+  // ponytail: past MAX_D changed lines the middle is one big hunk; nobody reviews line by line at that size anyway.
+  if (!ops) return [{ oStart: pre, oEnd: pre + A.length, nStart: pre, nEnd: pre + B.length }];
   const hunks = [];
   let i = 0, j = 0, cur = null;
-  const flush = () => { if (cur) { hunks.push(cur); cur = null; } };
-  while (i < n || j < m) {
-    if (i < n && j < m && A[i] === B[j]) { flush(); i++; j++; continue; }
+  for (const op of ops) {
+    if (!op) { if (cur) { hunks.push(cur); cur = null; } i++; j++; continue; }
     cur ??= { oStart: pre + i, oEnd: pre + i, nStart: pre + j, nEnd: pre + j };
-    if (j < m && (i === n || L[i][j + 1] >= L[i + 1][j])) { j++; cur.nEnd = pre + j; }
-    else { i++; cur.oEnd = pre + i; }
+    if (op > 0) cur.nEnd = pre + ++j;
+    else cur.oEnd = pre + ++i;
   }
-  flush();
+  if (cur) hunks.push(cur);
   return hunks;
+}
+
+// Myers' O((N+M)·D) diff: work grows with the lines changed, not the file size (a big file edited at its top and
+// bottom stays cheap). Returns the edit script in order (0 keep, 1 insert from b, -1 delete from a), or null past MAX_D.
+const MAX_D = 2000;
+function myers(a, b) {
+  const n = a.length, m = b.length, max = Math.min(n + m, MAX_D), off = max + 1;
+  const v = new Int32Array(2 * max + 3), trace = [];
+  for (let d = 0; d <= max; d++) {
+    trace.push(v.slice()); // the furthest reach after d-1 edits, to walk back through
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[off + k - 1] < v[off + k + 1]) ? v[off + k + 1] : v[off + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x < n || y < m) continue;
+      const ops = [];
+      for (let e = d; e > 0; e--) {
+        const t = trace[e], kk = x - y;
+        const down = kk === -e || (kk !== e && t[off + kk - 1] < t[off + kk + 1]);
+        const px = t[off + (down ? kk + 1 : kk - 1)], py = px - (down ? kk + 1 : kk - 1);
+        for (; x > px + (down ? 0 : 1); x--, y--) ops.push(0);
+        ops.push(down ? 1 : -1);
+        x = px; y = py;
+      }
+      for (; x > 0; x--) ops.push(0);
+      return ops.reverse();
+    }
+  }
+  return null;
 }
 
 const lines = (text) => (text === "" ? [] : text.split("\n"));

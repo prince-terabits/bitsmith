@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.25.2
+
+- **Alt+↑ / Alt+↓ stay on messages while older ones load:** loading earlier messages no longer nudges the view off
+  the message you were on, and Alt+↑ above the first loaded message loads the older page and lands on the one above.
+
+## 1.25.1
+
+- **Correct line counts for big files:** a large file edited near both its top and bottom showed almost every line as
+  changed (+2341 −2263 for a ~100-line edit). The diff now uses Myers' algorithm and matches `git diff`.
+
+## 1.25.0
+
+- **Status bar activity:** "Working" while a chat replies and "Needs approval" when one is waiting on you. Click it to
+  jump to that chat.
+- **Each chat keeps its own model, effort and mode.** A new chat starts from your last picks, and a reopened chat gets
+  its own back.
+- **Pinned chats stay at the top of Chat History.**
+- **"Finished" toast also appears when the VS Code window isn't in front**, not only when the chat is out of sight.
+- **Plans become a checklist:** after you approve a plan, its steps show in the Todos panel and tick off as Claude works.
+
 ## 1.24.1
 
 - **More models shows every model:** submenus stay inside the window (shifted up, scrolling if still too tall), and

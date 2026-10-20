@@ -14,13 +14,13 @@ const proposed = new Map(); // proposed-file uri -> content, right side of an "a
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 const ASK_PROMPT = "You are in Ask mode: answer questions about the code, explain, and suggest. You can read and search files, but you can't edit files or run commands. When a change would help, show it as a code block in your answer instead of applying it.";
 // Agent mode plans on its own, like Claude Code in a terminal: big work goes through plan mode first, small work just happens.
-const AGENT_PROMPT = "Decide first whether the request is heavy or small. Heavy means a new feature or subsystem, changes to several files, an unclear approach, or a design choice the user should weigh in on. For a heavy request your very first tool call must be EnterPlanMode, before any edit or command: research read-only, present the plan with ExitPlanMode, and implement it once the user approves. Small means a fix, a question, or a change to one or two files: just do it without planning. When the user explicitly asks to skip planning, skip it.";
+const AGENT_PROMPT = "Decide first whether the request is heavy or small. Heavy means a new feature or subsystem, changes to several files, an unclear approach, or a design choice the user should weigh in on. For a heavy request your very first tool call must be EnterPlanMode, before any edit or command: research read-only, present the plan with ExitPlanMode, and implement it once the user approves. Once a plan is approved, create one task per step with TaskCreate, then mark each in_progress and completed with TaskUpdate as you work through them. Small means a fix, a question, or a change to one or two files: just do it without planning. When the user explicitly asks to skip planning, skip it.";
 // Copilot's user-profile agents live next to globalStorage: <User>/prompts/*.agent.md
 const userAgentDir = () => storageDir && path.join(storageDir, "..", "..", "prompts");
 
 // Adding, editing or deleting an .agent.md updates the Mode picker; a running chat picks it up on its next message.
 function agentWatchers(provider) {
-  const changed = () => { provider.agentList = null; provider.post({ type: "settings", ...provider.settings() }); };
+  const changed = () => { provider.agentList = null; for (const c of provider.chats.values()) c.postSettings(); };
   const globs = ["**/.github/agents/*.agent.md", userAgentDir() && new vscode.RelativePattern(vscode.Uri.file(userAgentDir()), "*.agent.md")];
   return globs.filter(Boolean).map((g) => {
     const w = vscode.workspace.createFileSystemWatcher(g);
@@ -45,7 +45,20 @@ function parseAgent(file, text) {
   return { value: `agent:${file}`, label, description, tools: Array.isArray(tools) ? tools : null, prompt: (m ? text.slice(m[0].length) : text).trim() };
 }
 const PRE_BASH = "bitsmith_pre_bash"; // hook callback the CLI calls (and waits for) before each shell command
-const HIDDEN_TOOLS = new Set(["ToolSearch"]); // Claude loading its own tools: not a step worth showing
+const HIDDEN_TOOLS = new Set(["ToolSearch", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"]); // Claude loading its own tools, or its todos (the Todos panel shows those): not steps worth showing
+
+// Claude's task tools (on with CLAUDE_CODE_ENABLE_TODO_TOOLS) as the Todos panel's list: [{ id, content, activeForm, status }].
+function applyTask(list, tool, b) {
+  if (b.is_error) return list;
+  const { name, input = {} } = tool;
+  const id = name === "TaskCreate" && /Task #(\S+) created/.exec(resultText(b))?.[1];
+  if (id) return [...(list.every((t) => t.status === "completed") ? [] : list), // a finished list makes way for the next plan
+    { id, content: input.subject || "", activeForm: input.activeForm, status: "pending" }];
+  if (name !== "TaskUpdate") return list;
+  if (input.status === "deleted") return list.filter((t) => t.id !== input.taskId);
+  return list.map((t) => t.id !== input.taskId ? t : { ...t, ...(input.status && { status: input.status }),
+    ...(input.subject && { content: input.subject }), ...(input.activeForm && { activeForm: input.activeForm }) });
+}
 const EXCLUDE = "**/{node_modules,.git,dist,build,out,.next,.venv,__pycache__,coverage}/**";
 
 // Files that make something else run commands later: git/Claude/VS Code config and hooks, and shell startup files.
@@ -102,7 +115,8 @@ class Claude {
         "--allowedTools", "mcp__browser__browser_snapshot,mcp__browser__browser_screenshot,mcp__browser__browser_console"); // looking never asks; acting does
     }
     const compactAt = autoCompactAt();
-    const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1" }; // next-message guesses; without it they stop once plan usage passes 75%
+    // next-message guesses (without it they stop once plan usage passes 75%), and the task tools behind the Todos panel
+    const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1", CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" };
     if (compactAt === "off") env.DISABLE_AUTO_COMPACT = "1";
     else {
       if (/^\d+$/.test(compactAt)) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = compactAt;
@@ -153,6 +167,14 @@ class Claude {
   }
 }
 
+// A Map that says when it changes: a chat's pending approvals drive the status bar.
+class WatchedMap extends Map {
+  constructor(onChange) { super(); this.onChange = onChange; }
+  set(k, v) { super.set(k, v); this.onChange(); return this; }
+  delete(k) { const had = super.delete(k); this.onChange(); return had; }
+  clear() { super.clear(); this.onChange(); }
+}
+
 // One conversation: its own Claude Code process, approvals, checkpoints and background tasks.
 // Several run side by side; the panel shows one at a time and the rest keep going.
 class Chat {
@@ -162,7 +184,7 @@ class Chat {
     this.claude = null;
     this.sessionId = null;
     this.busy = false;
-    this.pending = new Map(); // permission request id -> { req, diff }
+    this.pending = new WatchedMap(() => this.p.updateWork()); // permission request id -> { req, diff }
     this.tools = new Map(); // tool_use id -> { name, input }
     this.befores = new Map(); // Write tool_use id -> the file's text before it (null: new file), to undo or diff just that step
     this.bashMarks = new Map();
@@ -181,10 +203,24 @@ class Chat {
     this.context = { used: 0, window: 0 }; // tokens in the conversation now, and the model's context window
   }
 
+  get busy() { return this._busy; }
+  set busy(v) { this._busy = v; this.p.updateWork(); } // the status bar's "Working"
   get folder() { return this.p.folder; }
   get edits() { return this.p.edits; }
   rel(file) { return this.p.rel(file); }
-  settings() { return this.p.settings(); }
+  settings() { return { ...this.p.settings(), ...this.prefs() }; }
+  // Model, effort and mode belong to the chat: a new one starts from the last picked, a reopened one gets its own back.
+  prefs() {
+    if (this._prefs) return this._prefs;
+    const { model, effort, mode } = this.p.settings();
+    const saved = this.sessionId && this.p.ws.get("chatPrefs")?.[this.sessionId];
+    return (this._prefs = { model, effort, mode, ...saved, ...(saved?.mode === "plan" && { mode: "agent" }) });
+  }
+  // ponytail: one small entry per chat ever tuned, never pruned; trim it alongside session deletes if it grows.
+  savePrefs() {
+    if (this.sessionId && this._prefs) this.p.ws.update("chatPrefs", { ...this.p.ws.get("chatPrefs"), [this.sessionId]: this._prefs });
+  }
+  postSettings() { if (this.panel || this === this.p.active) this.post({ type: "settings", ...this.settings() }); } // the webview shows one chat's
   sessionDir() { return this.p.sessionDir(); }
   post(msg) { this.p.post({ ...msg, chat: this.key }); }
   get fresh() { return !this.sessionId && !this.busy && !this.checkpoints.length; }
@@ -217,7 +253,7 @@ class Chat {
     return claude;
   }
 
-  // The model is a global setting; a chat picks up changes made while it was in the background. (Modes are launch flags,
+  // The running process follows the chat's model picks. (Modes are launch flags,
   // and planning is Claude's own EnterPlanMode / ExitPlanMode, so the CLI keeps its permission mode itself.)
   syncSettings() {
     const c = this.claude, s = this.settings();
@@ -258,7 +294,10 @@ class Chat {
     this.lastUuid = null;
     this.title = "";
     this.older = null;
+    this.todos = [];
+    this._prefs = null;
     this.post({ type: "clear" });
+    this.postSettings();
     this.setContext(0);
     this.p.chatChanged(this);
     this.ensure();
@@ -469,6 +508,8 @@ class Chat {
   toolResult(b, parent) {
     const t = this.tools.get(b.tool_use_id);
     if (!t) return;
+    if (/^Task(Create|Update)$/.test(t.name) && !parent) this.post({ type: "todos", todos: (this.todos = applyTask(this.todos || [], t, b)) });
+    if (HIDDEN_TOOLS.has(t.name)) return; // no step card to put a result on
     const item = resultItem(t, b, parent);
     if (t.name === "mcp__browser__browser_open" && !b.is_error && this.claude && !this.claude.browserShown) { // headless: nothing to watch otherwise
       this.claude.browserShown = true;
@@ -752,7 +793,9 @@ class Chat {
     this.busy = false;
     this.checkpoints = [];
     this.redoStack = [];
+    this._prefs = null;
     this.post({ type: "clear" });
+    this.postSettings();
     this.edits.refresh(); // its unreviewed changes from before a reload come back
     this.p.postDraft(this); // and its unsent message
     this.updateTitle();
@@ -776,6 +819,7 @@ class Chat {
     const cut = pageStart(items, items.length, 8); // the latest messages now; older ones as the user scrolls up
     this.older = items.slice(0, cut);
     this.post({ type: "replay", items: items.slice(cut), more: cut > 0 });
+    this.todos = items.findLast((it) => it.type === "todos")?.todos || [];
     const last = lastUsage(file);
     if (last) this.setContext(last.used, last.model);
     if (this.p.active === this) this.ensure(); // restored background tabs start their process when shown
@@ -873,15 +917,32 @@ class ChatProvider {
     return this.windows[model] || 200000;
   }
 
-  // A chat in the background, or the panel hidden: say so with a toast that jumps to it.
+  // A chat in the background, the panel hidden, or the window not in front: say so with a toast that jumps to it.
+  // ponytail: a VS Code toast, not an OS notification; it waits in the window until you come back.
   notify(c, what) {
-    if (c.panel ? c.panel.visible : c === this.active && this.view?.visible !== false) return;
-    vscode.window.showInformationMessage?.(`Bitsmith: "${c.title || "New chat"}" ${what}.`, "Show").then((pick) => {
-      if (!pick || !this.chats.has(c.key)) return;
-      if (c.panel) return c.panel.reveal();
-      vscode.commands.executeCommand("bitsmith.chat.focus");
-      this.switchTo(c);
-    });
+    const shown = c.panel ? c.panel.visible : c === this.active && this.view?.visible !== false;
+    if (shown && vscode.window.state?.focused !== false) return;
+    vscode.window.showInformationMessage?.(`Bitsmith: "${c.title || "New chat"}" ${what}.`, "Show").then((pick) => pick && this.reveal(c));
+  }
+
+  reveal(c) {
+    if (!c || !this.chats.has(c.key)) return;
+    if (c.panel) return c.panel.reveal();
+    vscode.commands.executeCommand("bitsmith.chat.focus");
+    this.switchTo(c);
+  }
+
+  // The status bar while any chat works: "Needs approval" first; clicking opens that chat.
+  updateWork() {
+    const item = this.workItem;
+    if (!item) return;
+    const all = [...this.chats.values()], waiting = all.find((c) => c.pending.size), busy = all.filter((c) => c.busy);
+    this.workChat = waiting || busy[0];
+    if (!this.workChat) return item.hide();
+    item.text = waiting ? "$(bell-dot) Needs approval" : `$(loading~spin) Working${busy.length > 1 ? ` (${busy.length})` : ""}`;
+    item.tooltip = `Bitsmith: "${this.workChat.title || "New chat"}" ${waiting ? "is waiting for your approval" : "is working"}. Click to open it.`;
+    item.backgroundColor = waiting ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
+    item.show();
   }
 
   // A chat's unsent message, kept across reloads: by session id, or "new" for the sidebar's not-yet-started chat.
@@ -953,7 +1014,7 @@ class ChatProvider {
         fs.mkdirSync(pick.dir, { recursive: true });
         fs.writeFileSync(file, `---\nname: ${name}\ndescription: What this agent does\ntools: ['read', 'search', 'edit', 'execute']\n---\nInstructions for the agent.\n`);
         this.agentList = null;
-        this.post({ type: "settings", ...this.settings() });
+        for (const c of this.chats.values()) c.postSettings();
       }
     }
     await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
@@ -1155,7 +1216,7 @@ class ChatProvider {
 
   // An editor-tab chat's webview loaded: settings, then the conversation from its transcript.
   panelReady(c) {
-    c.panel.webview.postMessage({ type: "settings", ...this.settings() });
+    c.panel.webview.postMessage({ type: "settings", ...c.settings() });
     c.panel.webview.postMessage({ type: "usage", usage: this.usage, plan: this.plan });
     if (this.info) c.panel.webview.postMessage({ type: "init", ...this.info });
     c.panel.webview.postMessage({ type: "chats", chats: [{ key: c.key, title: c.title }], active: c.key });
@@ -1226,7 +1287,7 @@ class ChatProvider {
       case "configureAgents": return this.configureAgents();
       case "openInEditor": return this.openInEditor(c);
       case "ready":
-        this.post({ type: "settings", ...this.settings() });
+        this.active.postSettings();
         this.post({ type: "usage", usage: this.usage, plan: this.plan });
         if (this.usageRequested) { this.usageRequested = false; this.post({ type: "showUsage" }); }
         if (this.info) this.post({ type: "init", ...this.info });
@@ -1330,7 +1391,8 @@ class ChatProvider {
   }
 
   setSetting(key, value, c = this.active) {
-    this.state.update(key, value);
+    this.state.update(key, value); // also the starting point for new chats
+    if (["model", "effort", "mode"].includes(key)) { c.prefs()[key] = value; c.savePrefs(); }
     if (key === "model" || key === "mode") c.syncSettings(); // the chat it was changed in (an editor tab's isn't the sidebar's)
   }
 
@@ -1361,6 +1423,7 @@ class ChatProvider {
     // An idle chat in the background doesn't need its process; it resumes on the next message.
     if (!prev.busy && !prev.tasks.length && !prev.pending.size) prev.restart();
     if (tell) this.post({ type: "showChat", chat: c.key });
+    c.postSettings();
     if (this.view) this.view.description = c.title || undefined;
     c.ensure();
   }
@@ -1397,6 +1460,7 @@ class ChatProvider {
 
   chatChanged(c) {
     this.saveTabs();
+    if (c.sessionId && !this.ws.get("chatPrefs")?.[c.sessionId]) c.savePrefs(); // a new chat's picks, now it has an id to keep them under
     c.panel?.webview.postMessage({ type: "tabState", sessionId: c.sessionId }); // what a reload reopens in this tab
     this.postSessions(); // a chat got its title: it now belongs in Recent chats
     if (c.panel) c.panel.title = c.title || "Bitsmith";
@@ -1627,12 +1691,13 @@ class ChatProvider {
     const rename = { iconPath: new vscode.ThemeIcon("edit"), tooltip: "Rename chat" };
     const qp = vscode.window.createQuickPick();
     let recent = [];
-    const pin = { iconPath: new vscode.ThemeIcon("pin"), tooltip: "Pin to the empty screen" };
+    const pin = { iconPath: new vscode.ThemeIcon("pin"), tooltip: "Pin to the top here and on the empty screen" };
     const unpin = { iconPath: new vscode.ThemeIcon("pinned"), tooltip: "Unpin" };
-    const item = (s, found) => ({ label: s.title, description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), id: s.id,
-      buttons: [this.pins().includes(s.id) ? unpin : pin, rename, trash], alwaysShow: found });
-    const load = () => {
-      recent = this.sessions(60);
+    const item = (s, found) => { const on = this.pins().includes(s.id); return { label: (on ? "$(pinned) " : "") + s.title,
+      description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), id: s.id, buttons: [on ? unpin : pin, rename, trash], alwaysShow: found }; };
+    const load = () => { // pinned chats first, then the rest newest first
+      const pins = this.pins();
+      recent = [...pins.map((id) => this.session(id)).filter((s) => s?.title), ...this.sessions(60).filter((s) => !pins.includes(s.id))];
       qp.items = recent.map((s) => item(s));
       qp.placeholder = recent.length ? "Resume a chat · type to search titles and messages" : "No past chats for this folder";
     };
@@ -1659,7 +1724,8 @@ class ChatProvider {
     qp.onDidTriggerItemButton(async ({ item: it, button }) => {
       if (button === pin || button === unpin) {
         this.togglePin(it.id);
-        return void (qp.items = qp.items.map((x) => x.id === it.id ? { ...x, buttons: [this.pins().includes(x.id) ? unpin : pin, rename, trash] } : x));
+        if (!qp.value.trim()) return load(); // re-sorted: it moves to or off the top
+        return void (qp.items = qp.items.map((x) => x.id === it.id ? item(this.session(x.id), x.alwaysShow) : x));
       }
       qp.ignoreFocusOut = true; // keep the list open behind the dialog
       if (button === rename ? await this.renameSession(it.id) : await this.deleteSession(it.id)) load();
@@ -2087,6 +2153,7 @@ function replay(file, rel) {
   const pasted = new Map();
   for (const e of all) (e.imagePasteIds || []).forEach((id, i) => { const img = imagesOf(e)[i]; if (img) pasted.set(id, img); });
   const subs = subagentFiles(file);
+  let todos = [];
   for (const e of withHistory(file, activeBranch(all))) {
     if (e.isSidechain) continue;
     const note = taskNotification(e);
@@ -2106,6 +2173,11 @@ function replay(file, rel) {
       for (const b of e.message.content) {
         const tool = b.type === "tool_result" && tools.get(b.tool_use_id);
         if (!tool) continue;
+        if (HIDDEN_TOOLS.has(tool.name)) { // only task tools get here: they rebuild the Todos panel
+          todos = applyTask(todos, tool, b);
+          items.push({ type: "todos", todos });
+          continue;
+        }
         const it = { ...resultItem(tool, b), at: Date.parse(e.timestamp) || undefined };
         if (tool.name === "Write" && it.edit && e.toolUseResult && "originalFile" in e.toolUseResult) it.before = e.toolUseResult.originalFile ?? null; // for undoing just this step
         items.push(it);
@@ -2114,6 +2186,7 @@ function replay(file, rel) {
       if (e.uuid) { lastUuid = e.uuid; userCount = 0; }
       for (const b of e.message?.content || []) {
         if (b.type === "text") items.push({ type: "textStart" }, { type: "text", text: b.text });
+        if (b.type === "tool_use" && /^Task(Create|Update)$/.test(b.name)) tools.set(b.id, b);
         if (b.type === "tool_use" && !HIDDEN_TOOLS.has(b.name)) {
           tools.set(b.id, b);
           if (b.name === "TodoWrite") items.push({ type: "todos", todos: b.input?.todos || [] });
@@ -2277,6 +2350,11 @@ function activate(context) {
   context.subscriptions.push({ dispose: () => clearInterval(poll) });
   if (vscode.window.onDidChangeWindowState) context.subscriptions.push(vscode.window.onDidChangeWindowState((s) => s.focused && provider.fetchUsage()));
   context.subscriptions.push(status, vscode.commands.registerCommand("bitsmith.showUsage", () => provider.showUsage()));
+  const work = vscode.window.createStatusBarItem("bitsmith.work", vscode.StatusBarAlignment.Right, 101);
+  work.name = "Bitsmith Activity";
+  work.command = "bitsmith.showWorking";
+  provider.workItem = work;
+  context.subscriptions.push(work, vscode.commands.registerCommand("bitsmith.showWorking", () => provider.reveal(provider.workChat)));
   provider.edits.register(context);
   let timer;
   const activeChanged = () => { clearTimeout(timer); timer = setTimeout(() => provider.postActiveFile(), 150); };

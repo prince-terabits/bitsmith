@@ -1289,8 +1289,29 @@ function makeChat(key) {
 function loadOlder(c, all) {
   if (!c.more || c.olderPending) return;
   c.olderPending = true;
-  c.el.prepend(h("div", { class: "older-loading muted" }, icon("loading", "spin"), "Loading earlier messages…"));
+  keepPlace(c.el, () => c.el.prepend(h("div", { class: "older-loading muted" }, icon("loading", "spin"), "Loading earlier messages…")));
   vscode.postMessage({ chat: c.key, type: "loadOlder", all });
+}
+
+// Add things above what's on screen without moving it: the message at the top of the view stays put.
+// (The browser's own scroll anchoring does this, except at scrollTop 0, which is exactly where older pages load.)
+function keepPlace(el, fn) {
+  const top = el.getBoundingClientRect().top;
+  const a = [...el.querySelectorAll(".turn")].find((x) => x.getBoundingClientRect().bottom > top);
+  const before = a?.getBoundingClientRect().top;
+  fn();
+  if (a) el.scrollTop += a.getBoundingClientRect().top - before;
+}
+
+// Alt+↑ / Alt+↓: to the previous / next message you sent. Above the first loaded one, load the older page and go on there.
+function jumpTurn(up) {
+  shown.jumpUp = false; // a newer key press wins over one still waiting for the older page
+  const el = shown.el, top = el.getBoundingClientRect().top + 8, turns = [...el.querySelectorAll(".turn")];
+  const t = up ? turns.findLast((x) => x.getBoundingClientRect().top < top - 4) : turns.find((x) => x.getBoundingClientRect().top > top + 4);
+  if (t) return void (el.scrollTop += t.getBoundingClientRect().top - top);
+  if (!up) return;
+  if (shown.more) { shown.jumpUp = true; return loadOlder(shown); }
+  el.scrollTop = 0;
 }
 
 // Not enough on screen to scroll up yet: fetch the next page now.
@@ -1521,7 +1542,7 @@ function handle(m) {
       scrollDown(true);
       return fillOlder(cur);
     case "older": { // a page further up: rendered apart, then slipped in on top without moving what's on screen
-      const pane = scroll, last = turn, fromBottom = pane.scrollHeight - pane.scrollTop;
+      const pane = scroll, last = turn;
       scroll = h("div");
       turn = null;
       try { for (const item of m.items) if (item.type !== "todos") handle(item); finalize(); } // its todo lists are long done
@@ -1529,12 +1550,11 @@ function handle(m) {
         const page = scroll;
         scroll = pane;
         turn = last;
-        pane.querySelector(".older-loading")?.remove();
-        pane.prepend(...page.children);
+        keepPlace(pane, () => { pane.querySelector(".older-loading")?.remove(); pane.prepend(...page.children); });
       }
-      pane.scrollTop = pane.scrollHeight - fromBottom;
       cur.more = m.more;
       cur.olderPending = false;
+      if (cur.jumpUp) { cur.jumpUp = false; if (cur === shown) jumpTurn(true); } // Alt+↑ asked for the message above these
       if (cur === shown && !findBar.classList.contains("hidden")) { runFind(true); loadOlder(cur, true); } // find searches the whole chat
       return fillOlder(cur);
     }
@@ -1675,13 +1695,9 @@ findInput.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
-  // Alt+↑ / Alt+↓: to the previous / next message you sent
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && shown) {
     e.preventDefault();
-    const el = shown.el, top = el.getBoundingClientRect().top + 8, turns = [...el.querySelectorAll(".turn")];
-    const t = e.key === "ArrowUp" ? turns.findLast((x) => x.getBoundingClientRect().top < top - 4) : turns.find((x) => x.getBoundingClientRect().top > top + 4);
-    if (t) el.scrollTop += t.getBoundingClientRect().top - top;
-    else if (e.key === "ArrowUp") el.scrollTop = 0; // the first one, or older messages still to load
+    jumpTurn(e.key === "ArrowUp");
   }
 });
 
