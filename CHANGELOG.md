@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.1
+
+- **Fix:** after restoring a checkpoint, a file the agent had created stayed in "N files changed" if its tab was still
+  open. Keep/Undo now ignores the old text in a tab left open on a deleted file, and a created file that is gone again
+  drops off the list.
+
 ## 1.27.0
 
 - **Explain / Fix / Tests:** right-click a selection in the editor to send it to the chat with a ready prompt. On an

@@ -187,7 +187,7 @@ class EditTracker {
 
   current(file) {
     const open = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === file);
-    if (open) return open.getText();
+    if (open && (open.isDirty || fs.existsSync(file))) return open.getText(); // a tab left open on a deleted file still holds its old text
     try { return fs.readFileSync(file, "utf8"); } catch { return null; }
   }
 
@@ -206,7 +206,7 @@ class EditTracker {
         continue;
       }
       const h = this.hunks(file);
-      if (!h.length && this.current(file) !== null && this.snapshots.get(file) !== null) { this.snapshots.delete(file); continue; } // nothing left to review (a created empty file still is)
+      if (!h.length && (this.current(file) === null) === (this.snapshots.get(file) === null)) { this.snapshots.delete(file); continue; } // nothing left to review, including created then deleted again (a created empty file still is)
       out.push({ file, ...stats(h), created: this.snapshots.get(file) === null, deleted: this.current(file) === null });
     }
     return out;

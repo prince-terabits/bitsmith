@@ -799,6 +799,14 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     for (const d of [1, 1, 1, -1]) { await provider.edits.goChange(d); went.push(ed.selection.active.line); }
     assert.deepStrictEqual(went, [1, 4, 1, 4]);
     console.log("change navigation ok");
+
+    // a created file that a restore deleted again is off the list, even with a tab still open on its old text
+    const gone = path.join(cwd, "gone.py");
+    provider.edits.snapshots.clear();
+    provider.edits.snapshotText(gone, null);
+    vscode.workspace.textDocuments = [{ uri: vscode.Uri.file(gone), isDirty: false, getText: () => "x = 1\n" }];
+    assert.deepStrictEqual(provider.edits.files(), []);
+    console.log("restored-away file leaves changes ok");
     process.exit(0);
   }
 
