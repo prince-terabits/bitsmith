@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.29.0
+
+- **`@bitsmith` in the Chat panel, with drag and drop.** VS Code doesn't let a panel like Bitsmith's take files dragged
+  from the Explorer (on Linux, holding Shift doesn't help either), but its own Chat panel does. Type `@bitsmith` there and
+  drag files, folders or selections in, or paste images. It is a real Bitsmith chat: the same Claude Code CLI, session
+  and settings, and it shows live as a tab in Bitsmith. Replies stream in, steps show as progress, and Allow / Deny
+  buttons answer approvals; **Continue in Bitsmith** opens the chat in full for plans, questions, step diffs, Keep/Undo,
+  Restore and History. Needs the Chat panel signed in to GitHub.
+
+## 1.28.1
+
+- **Fix: Todos stuck on a finished task.** When Claude ran tools in parallel, a reopened chat dropped the results of all
+  but the last call, so a task marked done alongside other tools still spun as in progress. Those results now replay too.
+
+## 1.28.0
+
+- **Fix: a reload reopens the right chat.** When Claude Code moved a chat to a new session file mid-conversation, the
+  sidebar (and an editor tab) still remembered the old file, so after a reload the latest messages seemed gone. The new
+  file is now saved the moment it starts.
+- **Same-named chats told apart:** when two chats share a title, Recent chats and History show each one's last prompt
+  ("Bitsmith extension · implement 1 to 4").
+- **Continue in Bitsmith:** right-click a terminal tab (or run it from the Command Palette) to open the newest chat of
+  this folder that isn't open in Bitsmith yet, e.g. the one you were just running in the terminal. Opening a chat that
+  changed in the last minute warns that it may still be open in a terminal, so you exit Claude there first.
+- **Pasted images are files too:** each pasted image is also saved under the temp folder (`bitsmith-images/`) and its path
+  goes into the message, so Claude's tools (Read, the browser, scripts) can use it, not only see it.
+
 ## 1.27.5
 
 - **Fix:** a chat that was also open in the terminal (resumed from the same conversation) disappeared from Recent and

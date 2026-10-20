@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A Copilot-style coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.27.5",
+  "version": "1.29.0",
   "publisher": "prince-terabits",
   "license": "UNLICENSED",
   "engines": {
@@ -20,6 +20,15 @@
     }
   },
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "bitsmith.chat",
+        "name": "bitsmith",
+        "fullName": "Bitsmith",
+        "description": "Claude Code: ask, edit, run (drag files in)",
+        "isSticky": true
+      }
+    ],
     "viewsContainers": {
       "secondarySidebar": [
         {
@@ -124,6 +133,11 @@
         "title": "Open Chat in Terminal",
         "category": "Bitsmith",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "bitsmith.continueFromTerminal",
+        "title": "Continue in Bitsmith",
+        "category": "Bitsmith"
       },
       {
         "command": "bitsmith.diffHead",
@@ -304,6 +318,11 @@
           "command": "bitsmith.commitMessage",
           "when": "scmProvider == git",
           "group": "navigation@0"
+        }
+      ],
+      "terminal/title/context": [
+        {
+          "command": "bitsmith.continueFromTerminal"
         }
       ],
       "explorer/context": [

@@ -114,7 +114,7 @@ const box = h("div", { class: "box" },
   h("div", { class: "toolbar" }, modeBtn, modelBtn, h("span", { class: "grow" }), meterBtn, sendBtn, stopBtn),
 );
 const composer = h("div", { id: "composer" }, recentPanel, tasksPanel, todosPanel, queuePanel, changesPanel, box,
-  h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "Start dragging, then press and hold Shift until you drop: VS Code only lets panels like this one receive drops while Shift is held. Or right-click files in the Explorer → Add to Bitsmith Chat." }, "/ for commands · hold Shift to drop files")));
+  h("div", { class: "footer" }, policyBtn, h("span", { class: "grow" }), h("span", { class: "muted hint", title: "VS Code doesn't let panels like this one take drops (on Windows and macOS, holding Shift while dropping works). To drag files from the Explorer, use @bitsmith in the Chat panel: the same chat, opened here with Continue in Bitsmith. Or right-click files in the Explorer → Add to Bitsmith Chat." }, "/ for commands · drag files into @bitsmith")));
 // In an editor tab VS Code's title bar is far away, so the tab gets its own header: title, history, new chat, more.
 const inTab = "tab" in document.body.dataset;
 const headTitle = h("span", { class: "ellipsis head-title", title: "Double-click to rename", ondblclick: () => send({ type: "renameChat" }) }, "New chat");
@@ -283,7 +283,7 @@ function activeIsAttached() {
 }
 
 function renderChips() {
-  const kids = [h("button", { class: "icon-btn attach", title: "Add files & folders (or Shift+drag them here)", onclick: () => send({ type: "pickContext" }) }, icon("add"))];
+  const kids = [h("button", { class: "icon-btn attach", title: "Add files & folders (or drag them into @bitsmith in the Chat panel)", onclick: () => send({ type: "pickContext" }) }, icon("add"))];
   if (S.active && !activeIsAttached()) {
     const a = S.active;
     kids.push(chip({ kind: "file", rel: a.rel, file: a.file, range: a.selection ? `${a.selection.start}-${a.selection.end}` : "" }, { suggested: true, off: !S.useActive, onToggle: () => { S.useActive = !S.useActive; renderChips(); } }));
@@ -525,8 +525,8 @@ function renderEmpty() {
     h("p", { class: "muted" }, "Build, fix and explain code with Claude Code."),
     h("div", { class: "hints muted small" },
       h("span", {}, icon("add"), "attach files"), h("span", {}, icon("symbol-event"), "/ commands"), h("span", {}, icon("diff"), "Keep or Undo edits"))));
-  const row = (s, pinned) => h("div", { class: "recent-item", role: "button", tabindex: "0", title: s.title, onclick: () => send({ type: "loadSession", id: s.id }) },
-    icon(pinned ? "pinned" : "comment-discussion"), h("span", { class: "ellipsis" }, s.title), h("span", { class: "muted small time" }, ago(s.time)),
+  const row = (s, pinned) => h("div", { class: "recent-item", role: "button", tabindex: "0", title: s.title + (s.note ? `\nLast: ${s.note}` : ""), onclick: () => send({ type: "loadSession", id: s.id }) },
+    icon(pinned ? "pinned" : "comment-discussion"), h("span", { class: "ellipsis" }, s.title, s.note && h("span", { class: "muted" }, ` · ${s.note}`)), h("span", { class: "muted small time" }, ago(s.time)),
     h("button", { class: "icon-btn pin-chat", title: pinned ? "Unpin" : "Pin (up to 5)", "aria-label": `${pinned ? "Unpin" : "Pin"} chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "pinSession", id: s.id }); } }, icon(pinned ? "pinned" : "pin")),
     h("button", { class: "icon-btn delete-chat", title: "Delete chat", "aria-label": `Delete chat: ${s.title}`, onclick: (e) => { e.stopPropagation(); send({ type: "deleteSession", id: s.id }); } }, icon("trash")));
   const recentHead = h("div", { class: "recent-head" }, h("span", { class: "section-title" }, "Recent chats"), h("span", { class: "grow" }),
@@ -940,7 +940,7 @@ function closeCard(actions, ...status) {
 function permissionCard(m) {
   const t = ensureTurn();
   t.text = null;
-  const actions = h("div", { class: "actions" });
+  const actions = h("div", { class: "actions", "data-perm": m.id });
   const decide = (allow, extra = {}, label) => {
     send({ type: "permission", id: m.id, allow, ...extra });
     closeCard(actions, icon(allow ? "check" : "close"), label || (allow ? "Allowed" : "Rejected"));
@@ -1557,6 +1557,9 @@ function handle(m) {
     }
     case "approvalsCancelled":
       for (const a of scroll.querySelectorAll(".permission .actions")) closeCard(a, "Cancelled");
+      return;
+    case "answered": // from @bitsmith in Copilot's chat panel
+      for (const a of scroll.querySelectorAll(`.permission .actions[data-perm="${CSS.escape(m.id)}"]`)) closeCard(a, icon(m.allow ? "check" : "close"), m.allow ? "Allowed" : "Rejected");
       return;
     case "redone":
       if (!redo) return;

@@ -47,10 +47,12 @@ const vscode = {
   languages: { registerCodeLensProvider: noop, registerCodeActionsProvider: (_, p) => { codeActions = p; return noop(); } },
   CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } }, CodeActionKind: { QuickFix: "quickfix" }, DiagnosticSeverity: { Error: 0, Warning: 1 },
   scm: { createSourceControl: () => (scm = { group: {}, createResourceGroup() { return this.group; }, dispose() { scm = null; } }) },
-  commands: { registerCommand: noop, executeCommand: async (...a) => { commands.push(a); } },
+  commands: { registerCommand: (id, f) => { cmds[id] = f; return noop(); }, executeCommand: async (...a) => { commands.push(a); } },
+  chat: { createChatParticipant: (id, h) => { chatHandler = h; return noop(); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
-let provider, tree, statusItem, workItem, serializer, scm, codeActions;
+let provider, tree, statusItem, workItem, serializer, scm, codeActions, chatHandler;
+const cmds = {};
 global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
@@ -121,8 +123,16 @@ assert.strictEqual(ext.diffRows("Write", { content: "x\n".repeat(500) }, 400).at
   const items = ext.replay(file, (f) => f);
   assert(!items.some((x) => x.type === "tool"), "no step cards for task tools");
   assert.deepStrictEqual(items.filter((x) => x.type === "todos").pop().todos.map((t) => `${t.id}:${t.content}:${t.status}`), ["1:Add model:completed", "2:Add view:in_progress"]);
+  // parallel calls: the tool_use entries chain, each result hangs off its own call, beside the chain
+  const tu = (uuid, parentUuid, id, name, input) => ({ uuid, parentUuid, type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+  const tr = (uuid, parentUuid, id, out) => ({ uuid, parentUuid, type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: out }] } });
+  fs.appendFileSync(file, [tu("p1", "r4", "x1", "TaskUpdate", { taskId: "2", status: "completed" }), tu("p2", "p1", "x2", "Read", { file_path: "/a" }),
+    tr("q1", "p1", "x1", "Updated task #2 status"), tr("q2", "p2", "x2", "a"),
+    { uuid: "z", parentUuid: "q2", type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }].map((e) => JSON.stringify(e)).join("\n") + "\n");
+  assert.deepStrictEqual(ext.replay(file, (f) => f).filter((x) => x.type === "todos").pop().todos.map((t) => t.status), ["completed", "completed"], "parallel task result applied");
   fs.rmSync(dir, { recursive: true });
 }
+
 const parsed = ext.parseUserText("<context>\nCurrent file: src/x.ts (lines 3-5 selected)\n```\ncode\n```\nAttached:\n- src/lib/ (folder)\n- a.txt (file)\n</context>\n\nfix it");
 assert.strictEqual(parsed.text, "fix it");
 assert.deepStrictEqual(parsed.chips.map((c) => c.kind + ":" + c.rel), ["file:src/x.ts", "folder:src/lib", "file:a.txt"]);
@@ -182,6 +192,75 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   provider.activeFile = realActive;
   console.log("context dedupe ok");
 
+  // pasted images also go in as file paths, which replay doesn't show as chips
+  const withImg = provider.withContext("look", [], false, [], ["/tmp/bitsmith-images/abc.png"]);
+  assert(withImg.includes("- /tmp/bitsmith-images/abc.png (image)"), withImg);
+  assert.deepStrictEqual(ext.parseUserText(withImg), { text: "look", chips: [] });
+  console.log("image paths ok");
+
+  // the CLI branching to a new session id is saved at once, so a reload reopens the branch, not the old id
+  {
+    const was = provider.active.sessionId, wasRestored = provider.restored;
+    provider.restored = true;
+    provider.active.sessionId = "old-id";
+    provider.active.handle({ type: "system", subtype: "init", session_id: "new-id" });
+    assert.strictEqual(state.get("openChats")?.ids?.[0], "new-id");
+    provider.active.sessionId = was;
+    provider.restored = wasRestored;
+    provider.saveTabs();
+    console.log("branch id saved ok");
+  }
+
+  // @bitsmith in Copilot's chat panel drives a real Bitsmith chat; the session id in the result finds it again
+  {
+    const realCreate = provider.createChat.bind(provider);
+    let chat, sent, answered;
+    provider.createChat = () => {
+      chat = realCreate();
+      chat.answer = (a) => { answered = a; chat.pending.delete(a.id); };
+      chat.send = async (msg) => {
+        sent = msg;
+        chat.busy = true;
+        chat.sessionId = "part-1";
+        chat.post({ type: "textStart" });
+        chat.post({ type: "text", text: "hi" });
+        chat.post({ type: "tool", title: "Read", detail: "a.txt" });
+        chat.pending.set("p1", { req: { tool_name: "Bash", input: {} } });
+        chat.post({ type: "permission", id: "p1", kind: "tool", question: "Run this command?", detail: "ls" });
+      };
+      return chat;
+    };
+    let md = "";
+    const buttons = [], progress = [];
+    const stream = { markdown: (t) => (md += t), progress: (t) => progress.push(t), button: (b) => buttons.push(b) };
+    const token = { onCancellationRequested: () => noop() };
+    const run = chatHandler({ prompt: "look", references: [{ value: vscode.Uri.file(path.join(cwd, "a.txt")) }, { value: { mimeType: "image/png", data: async () => new Uint8Array([1, 2]) } }] }, { history: [] }, stream, token);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepStrictEqual(sent.context, [{ kind: "file", file: path.join(cwd, "a.txt"), rel: "a.txt" }]);
+    assert.deepStrictEqual(sent.images, [{ mediaType: "image/png", data: "AQI=" }]);
+    assert(md.includes("hi") && md.includes("Run this command?") && md.includes("ls"), md);
+    assert.deepStrictEqual(progress, ["Read a.txt"]);
+    const allow = buttons.find((b) => b.title === "Allow");
+    const before = posts.length;
+    cmds[allow.command](...allow.arguments);
+    assert.deepStrictEqual(answered, { id: "p1", allow: true });
+    assert(posts.slice(before).some((m) => m.type === "answered" && m.id === "p1"), "the Bitsmith card closes too");
+    chat.busy = false;
+    chat.post({ type: "done" });
+    const result = await run;
+    assert.deepStrictEqual(result.metadata, { sessionId: "part-1" });
+    assert(buttons.some((b) => b.title === "Continue in Bitsmith" && b.arguments[0] === chat.key));
+    // the next turn finds the same chat
+    const first = chat;
+    chat.send = async () => { chat.post({ type: "done" }); };
+    const again = await chatHandler({ prompt: "more", references: [] }, { history: [{ result }] }, stream, token);
+    assert.strictEqual(chat, first, "no new chat");
+    assert.deepStrictEqual(again.metadata, { sessionId: "part-1" });
+    provider.createChat = realCreate;
+    provider.closeChat(first);
+    console.log("chat participant ok");
+  }
+
   // a chat started in this window shows in Recent chats on New Chat, without a reload
   {
     const id = "99999999-2222-3333-4444-555555555555", dir = provider.sessionDir();
@@ -208,9 +287,17 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     assert.deepStrictEqual(listed, [ids[2], ids[3]], "one entry per chat: " + listed);
     // the same chat carried on in the terminal and in Bitsmith: the older file was still written after the newer one began
     const now = Date.now() / 1000, br = ["e", "f"].map((x) => `${x.repeat(8)}-2222-3333-4444-555555555555`);
-    write(br[0], line({ uuid: "u5", message: { content: "branch me" } }), now + 100);
-    write(br[1], line({ uuid: "u5", message: { content: "branch me" } }), now + 50);
-    assert.deepStrictEqual(provider.sessions(60).map((s) => s.id).filter((id) => br.includes(id)), br, "both branches listed");
+    write(br[0], line({ uuid: "u5", message: { content: "branch me" } }) + line({ uuid: "u6", message: { content: "from the terminal" } }), now + 100);
+    write(br[1], line({ uuid: "u5", message: { content: "branch me" } }) + line({ uuid: "u7", message: { content: "from Bitsmith" } }), now + 50);
+    const both = provider.sessions(60).filter((s) => br.includes(s.id));
+    assert.deepStrictEqual(both.map((s) => [s.id, s.title, s.note]), [[br[0], "branch me", "from the terminal"], [br[1], "branch me", "from Bitsmith"]], "both branches listed, told apart by their last prompt");
+    // Continue in Bitsmith: the newest chat not already open here
+    const realOpen = provider.openSession;
+    let opened;
+    provider.openSession = (id) => (opened = id);
+    provider.continueFromTerminal();
+    provider.openSession = realOpen;
+    assert.strictEqual(opened, br[0]);
     for (const id of [...ids, ...br]) fs.rmSync(path.join(dir, id + ".jsonl"));
     console.log("history dedupe ok");
   }
@@ -1256,7 +1343,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   await provider.restore(replayed[1].checkpoint);
   assert.strictEqual(fs.readFileSync("d.txt", "utf8").trim(), "one", "file restored after reopening");
   p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 13);
-  assert(/CHERRY/.test(said(p)) && !/MANGO/.test(said(p)), "conversation rewound after reopening: " + said(p));
+  assert(/CHERRY/i.test(said(p)) && !/MANGO/i.test(said(p)), "conversation rewound after reopening: " + said(p));
   console.log("checkpoints after reopen ok:", said(p));
 
   // edit a message: files and conversation rewind to before it, then the edited text is sent
@@ -1272,7 +1359,7 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
   await send(restored.resend, 23); // what the panel does with `resend`
   assert.strictEqual(fs.readFileSync("e.txt", "utf8").trim(), "kiwi");
   p = await send("Which fruits have I told you I like in this chat? Reply with only the fruit names, comma separated.", 24);
-  assert(/PLUM/.test(said(p)) && /KIWI/.test(said(p)) && !/PEAR/.test(said(p)), "conversation has the edited message only: " + said(p));
+  assert(/PLUM/i.test(said(p)) && /KIWI/i.test(said(p)) && !/PEAR/i.test(said(p)), "conversation has the edited message only: " + said(p));
   console.log("edit message ok:", said(p));
 
   provider.shutdown();

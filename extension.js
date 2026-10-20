@@ -227,7 +227,7 @@ class Chat {
   }
   postSettings() { if (this.panel || this === this.p.active) this.post({ type: "settings", ...this.settings() }); } // the webview shows one chat's
   sessionDir() { return this.p.sessionDir(); }
-  post(msg) { this.p.post({ ...msg, chat: this.key }); }
+  post(msg) { this.tap?.(msg); this.p.post({ ...msg, chat: this.key }); } // tap: @bitsmith in Copilot's chat panel
   get fresh() { return !this.sessionId && !this.busy && !this.checkpoints.length; }
 
   // ---- process lifecycle ----
@@ -355,7 +355,8 @@ class Chat {
     if (checkpoint != null) this.checkpoints.push({ id: checkpoint, key: `${this.lastUuid || "start"}#${this.userCount}`, sessionId: this.sessionId, resumeAt: this.lastUuid, snaps: new Map() });
     this.userCount++;
     const content = images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } }));
-    content.push({ type: "text", text: this.p.withContext(text, context, useActive, this.shellNotes) });
+    const files = images.map((img) => { try { return imageFile(img.mediaType, img.data); } catch { return null; } }).filter(Boolean); // a path for tools (browser, Read) too
+    content.push({ type: "text", text: this.p.withContext(text, context, useActive, this.shellNotes, files) });
     this.shellNotes = [];
     claude.write({ type: "user", message: { role: "user", content } });
   }
@@ -407,7 +408,12 @@ class Chat {
   // ---- CLI messages ----
 
   handle(m) {
-    if (m.session_id && m.type === "system" && m.subtype === "init") { this.sessionId = m.session_id; this.resumeAt = null; } // a rewind is kept until the CLI has branched, so a restart before that still rewinds
+    if (m.session_id && m.type === "system" && m.subtype === "init") { // a rewind is kept until the CLI has branched, so a restart before that still rewinds
+      const moved = m.session_id !== this.sessionId;
+      this.sessionId = m.session_id;
+      this.resumeAt = null;
+      if (moved) this.p.chatChanged(this); // a branch has a new id: a reload must reopen it, not the old one
+    }
     const parent = m.parent_tool_use_id || null; // set on a sub-agent's own messages
     if (!this.busy && !parent && (m.type === "stream_event" || m.type === "assistant")) this.beginAuto();
     if (m.type === "stream_event" && !parent) {
@@ -1583,6 +1589,11 @@ class ChatProvider {
   openSession(id, tab = null) {
     const open = [...this.chats.values()].find((c) => c.sessionId === id);
     if (open) return open.panel ? open.panel.reveal() : this.switchTo(open);
+    // Written in the last minute, but not by this window: likely a Claude still running in a terminal on the same file.
+    const s = this.session(id);
+    if (s && Date.now() - s.time < 60000 && !this.seen?.has(id))
+      vscode.window.showWarningMessage(`Bitsmith: "${s.title || "this chat"}" changed under a minute ago, so it may still be open in a terminal. Exit Claude there before replying here, or both write into the same chat.`);
+    (this.seen ||= new Set()).add(id); // warned once
     if (tab) return tab.fresh ? tab.loadSession(id) : this.openTab(id); // picked from an editor tab: stay in the editor area
     let c = this.active;
     if (!c.fresh || c.busy) {
@@ -1593,7 +1604,17 @@ class ChatProvider {
     return c.loadSession(id);
   }
 
+  // A terminal session picked up here (right-click a terminal tab → Continue in Bitsmith).
+  // ponytail: the newest chat not open here, not necessarily that terminal's; match by terminal name if several run at once.
+  continueFromTerminal() {
+    const open = new Set([...this.chats.values()].map((c) => c.sessionId));
+    const s = this.sessions(20).find((x) => !open.has(x.id));
+    if (!s) return vscode.window.showInformationMessage("Bitsmith: no other chat in this folder to continue.");
+    return this.openSession(s.id);
+  }
+
   chatChanged(c) {
+    if (c.sessionId) (this.seen ||= new Set()).add(c.sessionId); // written by this window, so no "open in a terminal" warning
     this.saveTabs();
     if (c.sessionId && !this.ws.get("chatPrefs")?.[c.sessionId]) c.savePrefs(); // a new chat's picks, now it has an id to keep them under
     c.panel?.webview.postMessage({ type: "tabState", sessionId: c.sessionId }); // what a reload reopens in this tab
@@ -1603,7 +1624,7 @@ class ChatProvider {
     if (c === this.active && this.view) this.view.description = c.title || undefined;
   }
 
-  withContext(text, items, useActive, shellNotes = []) {
+  withContext(text, items, useActive, shellNotes = [], imageFiles = []) {
     const out = [];
     for (const n of shellNotes) out.push(`I ran \`${n.command}\` in the folder (exit ${n.code}):`, "```\n" + (n.output || "(no output)") + "\n```");
     const active = useActive && this.activeFile();
@@ -1614,6 +1635,7 @@ class ChatProvider {
     const attached = items.filter((i) => i.kind !== "selection" && !(active && !active.selection && i.file === active.file)); // listed once
     if (attached.length) out.push("Attached:", ...attached.map((i) => `- ${i.rel}${i.kind === "folder" ? "/" : ""} (${i.kind})`));
     for (const s of items.filter((i) => i.kind === "selection")) out.push(`Selection from ${s.rel} lines ${s.start}-${s.end}:`, "```\n" + s.text + "\n```");
+    if (imageFiles.length) out.push("Pasted images, also saved as files for tools that need a path:", ...imageFiles.map((f) => `- ${f} (image)`));
     return out.length ? `<context>\n${out.join("\n")}\n</context>\n\n${text}` : text;
   }
 
@@ -1810,18 +1832,21 @@ class ChatProvider {
   sessions(limit) {
     let files = [];
     try { files = fs.readdirSync(this.sessionDir()).filter((f) => f.endsWith(".jsonl")); } catch {}
-    return latestCopies(files
+    const list = latestCopies(files
       .map((f) => { const file = path.join(this.sessionDir(), f); try { const st = fs.statSync(file); return { id: f.slice(0, -6), file, time: st.mtimeMs, born: st.birthtimeMs }; } catch { return null; } })
       .filter(Boolean)
       .sort((a, b) => b.time - a.time))
       .slice(0, limit)
       .map((s) => ({ ...s, title: sessionTitle(s.file) }))
       .filter((s) => s.title);
+    // Chats with the same title (e.g. one conversation carried on in the terminal and here) show their last prompt to tell them apart.
+    for (const s of list) if (list.some((o) => o !== s && o.title === s.title)) s.note = lastPrompt(s.file);
+    return list;
   }
 
   // Pinned chats (up to 5 per folder) lead the empty screen; Recent lists the rest.
   sessionsMsg() {
-    const pick = ({ id, title, time }) => ({ id, title, time });
+    const pick = ({ id, title, time, note }) => ({ id, title, time, note });
     const pinned = this.pins().map((id) => this.session(id)).filter((s) => s?.title).map(pick);
     const ids = new Set(pinned.map((s) => s.id));
     return { type: "sessions", items: this.sessions(6 + ids.size).filter((s) => !ids.has(s.id)).map(pick), pinned };
@@ -1852,7 +1877,7 @@ class ChatProvider {
     const pin = { iconPath: new vscode.ThemeIcon("pin"), tooltip: "Pin to the top here and on the empty screen" };
     const unpin = { iconPath: new vscode.ThemeIcon("pinned"), tooltip: "Unpin" };
     const item = (s, found) => { const on = this.pins().includes(s.id); return { label: (on ? "$(pinned) " : "") + s.title,
-      description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), id: s.id, buttons: [on ? unpin : pin, rename, trash], alwaysShow: found }; };
+      description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), detail: s.note && `Last: ${s.note}`, id: s.id, buttons: [on ? unpin : pin, rename, trash], alwaysShow: found }; };
     const load = () => { // pinned chats first, then the rest newest first
       const pins = this.pins();
       recent = [...pins.map((id) => this.session(id)).filter((s) => s?.title), ...this.sessions(60).filter((s) => !pins.includes(s.id))];
@@ -2303,6 +2328,14 @@ function sessionTitle(file) {
   }
 }
 
+// The last thing the user typed in a chat, from the end of its file ("" if none there).
+function lastPrompt(file) {
+  let size;
+  try { size = fs.statSync(file).size; } catch { return ""; }
+  const t = readLines(file, Math.max(0, size - 65536), 65536).map(parse).filter(Boolean).map(userText).filter(Boolean).pop();
+  return t ? parseUserText(t).text.replace(/\s+/g, " ").trim().slice(0, 60) : "";
+}
+
 function replay(file, rel) {
   const items = [];
   const tools = new Map();
@@ -2410,7 +2443,9 @@ function activeBranch(all) {
   const keep = new Set();
   let e = all.findLast((x) => x.uuid && !x.isSidechain && (x.type === "user" || x.type === "assistant"));
   for (; e && !keep.has(e.uuid); e = byId.get(e.parentUuid || e.logicalParentUuid)) keep.add(e.uuid);
-  return all.filter((x) => keep.has(x.uuid));
+  // Parallel tool calls chain their tool_use entries, but each result hangs off its own call, beside the chain.
+  const isResult = (x) => x.type === "user" && Array.isArray(x.message?.content) && x.message.content.some((b) => b.type === "tool_result");
+  return all.filter((x) => keep.has(x.uuid) || (keep.has(x.parentUuid) && isResult(x)));
 }
 
 // A fork of a compacted chat (a rewind, an edit, a background compaction) starts at the compaction: the CLI copies
@@ -2456,13 +2491,16 @@ function realPath(file) {
   return parent === file ? file : path.join(realPath(parent), path.basename(file));
 }
 
-function openImage(mediaType, data) {
-  if (!data) return;
+function imageFile(mediaType, data) {
   const ext = (/^image\/(\w+)$/.exec(mediaType || "")?.[1] || "png").replace("jpeg", "jpg");
   const file = path.join(os.tmpdir(), "bitsmith-images", require("crypto").createHash("sha1").update(data).digest("hex").slice(0, 16) + "." + ext);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(data, "base64"));
-  vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file), { preview: true });
+  return file;
+}
+
+function openImage(mediaType, data) {
+  if (data) vscode.commands.executeCommand("vscode.open", vscode.Uri.file(imageFile(mediaType, data)), { preview: true });
 }
 
 // At a line, or with lines line..end selected (e.g. what a Read step read).
@@ -2491,6 +2529,90 @@ function migrateFromMyAgent(context) {
   const old = path.join(path.dirname(context.globalStorageUri.fsPath), "prince-terabits.my-agent", "checkpoints");
   if (fs.existsSync(dir) || !fs.existsSync(old)) return;
   try { fs.cpSync(old, dir, { recursive: true }); } catch {}
+}
+
+// @bitsmith in Copilot's chat panel, whose native input takes files dragged from the Explorer (webviews can't).
+// Each conversation is a real Bitsmith chat: the same CLI process, session file and settings, also shown as a Bitsmith tab.
+// Copilot keeps each turn's result, so the session id in it finds the chat again, even after a reload.
+// ponytail: plan and question pickers, step diffs and Keep/Undo stay in the Bitsmith panel ("Open in Bitsmith").
+function participant(provider) {
+  if (!vscode.chat?.createChatParticipant) return [];
+  const bySession = (id) => [...provider.chats.values()].find((c) => c.sessionId === id);
+  const findChat = async (history) => {
+    const id = history.findLast((t) => t.result?.metadata?.sessionId)?.result.metadata.sessionId;
+    if (id && !bySession(id) && fs.existsSync(path.join(provider.sessionDir(), id + ".jsonl"))) await provider.openSession(id);
+    let c = id && bySession(id);
+    if (!c) { c = provider.createChat(); provider.post({ type: "openChat", chat: c.key }); }
+    return c;
+  };
+  const attachments = async (refs) => { // dropped or #-mentioned files and folders, selections, pasted images
+    const context = [], images = [];
+    for (const { value: v } of refs) {
+      try {
+        if (v?.scheme === "file" && v.fsPath) {
+          const st = await vscode.workspace.fs.stat(v);
+          context.push({ kind: st.type & vscode.FileType.Directory ? "folder" : "file", file: v.fsPath, rel: provider.rel(v.fsPath) });
+        } else if (v?.uri?.scheme === "file" && v.range) {
+          const doc = await vscode.workspace.openTextDocument(v.uri);
+          context.push({ kind: "selection", file: v.uri.fsPath, rel: provider.rel(v.uri.fsPath), start: v.range.start.line + 1, end: v.range.end.line + 1, text: doc.getText(v.range) });
+        } else if (v?.mimeType?.startsWith("image/") && v.data) images.push({ mediaType: v.mimeType, data: Buffer.from(await v.data()).toString("base64") });
+      } catch {}
+    }
+    return { context, images };
+  };
+  const handler = async (request, ctx, stream, token) => {
+    const c = await findChat(ctx.history);
+    const result = () => ({ metadata: { sessionId: c.sessionId } });
+    const open = (title) => stream.button({ title, command: "bitsmith.showChat", arguments: [c.key] });
+    if (c.busy) { stream.markdown("This chat is still replying. Wait for it, or follow it in Bitsmith.\n\n"); open("Open in Bitsmith"); return result(); }
+    const { context, images } = await attachments(request.references || []);
+    let wrote = false;
+    const ask = (m) => {
+      if (m.kind === "plan" || m.kind === "question") { stream.markdown(`\n\n**Claude needs your answer:** ${m.kind === "plan" ? "a plan to approve" : "a question"}.\n\n`); return open("Answer in Bitsmith"); }
+      const detail = m.kind === "tool" && m.detail ? "\n~~~\n" + m.detail + "\n~~~\n" : "";
+      stream.markdown(`\n\n**${m.kind === "edit" ? `${m.name} ${m.detail}?` : m.question}**${m.sub ? ` ${m.sub}` : ""}\n${detail}${m.risk ? `\n> ${m.risk}\n` : ""}\n`);
+      for (const allow of [true, false]) stream.button({ title: allow ? "Allow" : "Deny", command: "bitsmith.participantAnswer", arguments: [c.key, m.id, allow] });
+      if (m.kind === "edit") open("Review in Bitsmith");
+    };
+    let stop;
+    await new Promise((resolve) => {
+      c.tap = (m) => {
+        if (m.type === "textStart") { if (wrote) stream.markdown("\n\n"); }
+        else if (m.type === "text") { wrote = true; stream.markdown(m.text); }
+        else if (m.type === "tool" && !m.parent) stream.progress(`${m.title} ${m.detail || ""}`.trim());
+        else if (m.type === "todos") stream.progress(`Todos ${m.todos.filter((t) => t.status === "completed").length}/${m.todos.length}`);
+        else if (m.type === "permission") ask(m);
+        else if (m.type === "error") { stream.markdown(`\n\n> ⚠️ ${m.text}\n`); if (!c.busy) resolve(); } // a running turn still ends with "done"
+        else if (m.type === "done") resolve();
+      };
+      stop = token.onCancellationRequested(() => { c.interrupt(); resolve(); });
+      c.post({ type: "user", text: request.prompt, chips: context.map((i) => ({ ...i, range: i.kind === "selection" ? `${i.start}-${i.end}` : "" })) });
+      c.post({ type: "autoTurn" }); // the Bitsmith tab shows the message and goes busy, as if typed there
+      c.send({ text: request.prompt, context, images });
+    });
+    c.tap = null;
+    stop?.dispose();
+    stream.markdown("\n\n");
+    open("Continue in Bitsmith");
+    return result();
+  };
+  const p = vscode.chat.createChatParticipant("bitsmith.chat", handler);
+  p.iconPath = vscode.Uri.joinPath(provider.context.extensionUri, "media", "logo.png");
+  return [p,
+    vscode.commands.registerCommand("bitsmith.participantAnswer", (key, id, allow) => {
+      const c = provider.chats.get(key);
+      if (!c?.pending.has(id)) return; // answered already, here or in the Bitsmith panel
+      c.answer({ id, allow });
+      c.post({ type: "answered", id, allow });
+    }),
+    vscode.commands.registerCommand("bitsmith.showChat", (key) => {
+      const c = provider.chats.get(key);
+      if (!c) return;
+      if (c.panel) return c.panel.reveal();
+      vscode.commands.executeCommand("bitsmith.chat.focus");
+      provider.switchTo(c);
+    }),
+  ];
 }
 
 function activate(context) {
@@ -2544,6 +2666,7 @@ function activate(context) {
       const id = state?.sessionId && fs.existsSync(path.join(provider.sessionDir(), state.sessionId + ".jsonl")) ? state.sessionId : null; // deleted meanwhile: an empty chat
       provider.openTab(id, panel);
     } }),
+    vscode.commands.registerCommand("bitsmith.continueFromTerminal", () => provider.continueFromTerminal()),
     vscode.commands.registerCommand("bitsmith.addContext", () => provider.pickContext()),
     vscode.commands.registerCommand("bitsmith.addToChat", (uri, uris) => provider.addUris(uris?.length ? uris : uri ? [uri] : [])),
     vscode.commands.registerCommand("bitsmith.addSelection", () => provider.addSelection()),
@@ -2562,6 +2685,7 @@ function activate(context) {
     }),
     vscode.commands.registerCommand("bitsmith.diffHead", () => provider.diffHead()),
     ...agentWatchers(provider),
+    ...participant(provider),
     vscode.commands.registerCommand("bitsmith.keepAll", () => provider.edits.keep([...provider.current().touched])),
     vscode.commands.registerCommand("bitsmith.undoAll", () => provider.edits.undo([...provider.current().touched])),
     { dispose: () => provider.shutdown() },
