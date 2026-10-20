@@ -44,12 +44,13 @@ const vscode = {
     createTreeView: (_, o) => { tree = o.treeDataProvider; return noop(); }, showWarningMessage: async () => undefined,
     onDidChangeActiveTextEditor: noop, onDidChangeTextEditorSelection: noop, onDidChangeVisibleTextEditors: noop,
   },
-  languages: { registerCodeLensProvider: noop },
+  languages: { registerCodeLensProvider: noop, registerCodeActionsProvider: (_, p) => { codeActions = p; return noop(); } },
+  CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } }, CodeActionKind: { QuickFix: "quickfix" }, DiagnosticSeverity: { Error: 0, Warning: 1 },
   scm: { createSourceControl: () => (scm = { group: {}, createResourceGroup() { return this.group; }, dispose() { scm = null; } }) },
   commands: { registerCommand: noop, executeCommand: async (...a) => { commands.push(a); } },
   env: { clipboard: { writeText: async () => {} }, openExternal: async () => true },
 };
-let provider, tree, statusItem, workItem, serializer, scm;
+let provider, tree, statusItem, workItem, serializer, scm, codeActions;
 global.fetch = async () => ({ ok: false }); // no real plan-usage requests from tests
 const load = Module._load;
 Module._load = (req, ...a) => (req === "vscode" ? vscode : load(req, ...a));
@@ -701,6 +702,103 @@ const said = (p) => p.filter((m) => m.type === "text").map((m) => m.text).join("
     two.busy = false;
     assert(!workItem.shown, "hidden when idle");
     console.log("status bar activity ok");
+
+    // "!command": runs in the folder, shows a card, and goes with the next message
+    const st8 = posts.length;
+    two.shell("echo hi && exit 3");
+    const sh = await waitFor((m) => m.type === "shell", st8);
+    assert.deepStrictEqual([sh.output, sh.code], ["hi", 3]);
+    assert(/I ran `echo hi && exit 3` in the folder \(exit 3\):\n```\nhi\n```/.test(provider.withContext("q", [], false, two.shellNotes)), "in the next message's context");
+    console.log("! command ok");
+
+    // "# note" appends to the picked CLAUDE.md and makes running chats reread it
+    vscode.window.showQuickPick = async (items) => items[0];
+    fs.writeFileSync("CLAUDE.md", "# Rules");
+    await provider.memory(two, "use pnpm");
+    assert.strictEqual(fs.readFileSync("CLAUDE.md", "utf8"), "# Rules\n- use pnpm\n");
+    assert(provider.memoryStamp >= 1, "a restart is due");
+    console.log("memory note ok");
+
+    // extra folders and the backup model reach the CLI's launch flags
+    const cfgBase = vscode.workspace.getConfiguration;
+    vscode.workspace.getConfiguration = () => ({ get: (k) => ({ diagnostics: true, fallbackModel: "haiku" })[k] ?? cfgBase().get(k) });
+    const three = provider.createChat();
+    provider.setDirs(three, [require("os").tmpdir()]);
+    three.ensure();
+    const args = three.claude.proc.spawnargs.join(" ");
+    three.shutdown();
+    assert(args.includes(`--fallback-model haiku --add-dir ${require("os").tmpdir()}`), args);
+    console.log("add-dir and fallback model ok");
+
+    // after an edit, VS Code's errors in the file go back to Claude
+    const diagFile = path.join(cwd, "a.txt");
+    vscode.DiagnosticSeverity = { Error: 0, Warning: 1 };
+    vscode.languages.onDidChangeDiagnostics = (f) => { setTimeout(() => f({ uris: [vscode.Uri.file(diagFile)] }), 10); return { dispose() {} }; };
+    vscode.languages.getDiagnostics = () => [{ severity: 0, message: "Undefined name 'x'", source: "Pylance", range: { start: { line: 4 } } }, { severity: 1, message: "unused", range: { start: { line: 1 } } }];
+    let hookOut;
+    three.claude = { write: (o) => (hookOut = o.response.response), kill() {} };
+    await three.postEdit("h1", { input: { tool_input: { file_path: diagFile } } });
+    assert.strictEqual(hookOut.hookSpecificOutput.additionalContext, "VS Code reports these errors in a.txt after the edit:\n- line 5: Undefined name 'x' (Pylance)");
+    three.claude = null;
+    vscode.workspace.getConfiguration = cfgBase;
+    console.log("diagnostics to Claude ok");
+
+    // rewind: code only keeps the messages, conversation only keeps the files
+    const rw = path.join(cwd, "rw.txt");
+    three.ensure = () => {};
+    const rewind = async (pick) => {
+      fs.writeFileSync(rw, "after\n");
+      three.checkpoints = [{ id: 9, sessionId: null, resumeAt: null, snaps: new Map([[rw, "before\n"]]) }];
+      vscode.window.showWarningMessage = async (...a) => (assert(a.includes("Code only")), pick);
+      await three.restore(9);
+    };
+    await rewind("Code only");
+    assert.deepStrictEqual([fs.readFileSync(rw, "utf8"), three.checkpoints.length], ["before\n", 1]);
+    await rewind("Conversation only");
+    assert.deepStrictEqual([fs.readFileSync(rw, "utf8"), three.checkpoints.length], ["after\n", 0]);
+    console.log("rewind choices ok");
+
+    // Explain / Fix / Tests: the selection, or the lightbulb's error lines, goes to the chat with a ready prompt
+    const qa = path.join(cwd, "b.txt"), qdoc = { uri: vscode.Uri.file(qa), getText: (r) => (r ? "two\n" : ""), lineCount: 4 };
+    vscode.workspace.textDocuments = [qdoc];
+    vscode.window.activeTextEditor = { document: qdoc, selection: { isEmpty: false, start: { line: 1 }, end: { line: 1 } } };
+    const st9 = posts.length;
+    provider.quickAction("explain");
+    let q = await waitFor((m) => m.type === "quickAction", st9);
+    assert.deepStrictEqual([q.text, q.items[0].kind, q.items[0].start, q.items[0].text], ["Explain this code.", "selection", 2, "two\n"]);
+    const acts = codeActions.provideCodeActions(qdoc, null, { diagnostics: [{ severity: 0, message: "bad", source: "Pylance", range: { start: { line: 2 }, end: { line: 2 } } }, { severity: 3, message: "hint" }] });
+    assert.deepStrictEqual([acts.length, acts[0].command.command], [1, "bitsmith.fix"], "a lightbulb fix for the error, none for the hint");
+    provider.quickAction("fix", ...acts[0].command.arguments);
+    q = await waitFor((m) => m.type === "quickAction" && m.text.startsWith("Fix"), st9);
+    assert.deepStrictEqual([q.text, q.items[0].start, q.items[0].end], ["Fix this error at line 3: bad (Pylance)", 3, 3]);
+    console.log("quick actions ok");
+
+    // code blocks: Insert goes in at the cursor, Apply asks Claude to merge it into the file
+    let inserted;
+    const sel = { isEmpty: true };
+    vscode.window.activeTextEditor = { document: qdoc, selection: sel, edit: async (f) => f({ replace: (s, t) => (inserted = [s, t]) }) };
+    await provider.onWebview({ type: "insertCode", text: "x = 1" });
+    assert.deepStrictEqual(inserted, [sel, "x = 1"]);
+    const st10 = posts.length;
+    await provider.onWebview({ type: "applyCode", text: "x = 1\n", lang: "py" });
+    q = await waitFor((m) => m.type === "quickAction", st10);
+    assert.strictEqual(q.text, "Apply this code to `b.txt`:\n\n```py\nx = 1\n```");
+    console.log("insert and apply code ok");
+
+    // next / previous change: through the hunks from the cursor, wrapping around
+    const cf = path.join(cwd, "c.txt");
+    fs.writeFileSync(cf, "1\nX\n3\n4\nY\n");
+    provider.edits.snapshots.clear();
+    provider.edits.snapshotText(cf, "1\n2\n3\n4\n5\n");
+    Object.assign(vscode, { Position: class { constructor(line) { this.line = line; } }, Selection: class { constructor(a) { this.active = a; } }, TextEditorRevealType: { InCenter: 2 } });
+    let ed = null;
+    vscode.window.setStatusBarMessage = () => {};
+    vscode.window.showTextDocument = async (u) => (ed = vscode.window.activeTextEditor = { document: { uri: u, lineCount: 6 }, revealRange() {} });
+    vscode.window.activeTextEditor = null;
+    const went = [];
+    for (const d of [1, 1, 1, -1]) { await provider.edits.goChange(d); went.push(ed.selection.active.line); }
+    assert.deepStrictEqual(went, [1, 4, 1, 4]);
+    console.log("change navigation ok");
     process.exit(0);
   }
 

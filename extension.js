@@ -1,5 +1,5 @@
 const vscode = require("vscode");
-const { spawn } = require("child_process");
+const { spawn, exec } = require("child_process");
 const { ToolsPanel } = require("./tools");
 const readline = require("readline");
 const path = require("path");
@@ -45,6 +45,7 @@ function parseAgent(file, text) {
   return { value: `agent:${file}`, label, description, tools: Array.isArray(tools) ? tools : null, prompt: (m ? text.slice(m[0].length) : text).trim() };
 }
 const PRE_BASH = "bitsmith_pre_bash"; // hook callback the CLI calls (and waits for) before each shell command
+const POST_EDIT = "bitsmith_post_edit"; // after each edit: VS Code's errors in that file go back to Claude
 const HIDDEN_TOOLS = new Set(["ToolSearch", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"]); // Claude loading its own tools, or its todos (the Todos panel shows those): not steps worth showing
 
 // Claude's task tools (on with CLAUDE_CODE_ENABLE_TODO_TOOLS) as the Todos panel's list: [{ id, content, activeForm, status }].
@@ -94,11 +95,15 @@ function autoCompactAt() {
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
-  constructor({ cwd, model, effort, resume, resumeAt, agent, onMessage, onExit }) {
+  constructor({ cwd, model, effort, resume, resumeAt, agent, dirs = [], onMessage, onExit }) {
     const cfg = vscode.workspace.getConfiguration("bitsmith");
     const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
     if (model && model !== "default") args.push("--model", model);
+    this.fallback = cfg.get("fallbackModel") || "";
+    if (this.fallback) args.push("--fallback-model", this.fallback); // overloaded or unavailable: the reply goes on with this one
+    if (dirs.length) args.push("--add-dir", ...dirs); // folders beyond the workspace Claude may read without asking
+    this.dirsKey = dirs.join("\n");
     if (agent?.prompt) args.push("--append-system-prompt", agent.prompt); // Ask mode or a custom agent
     if (agent?.disallowed?.length) args.push("--disallowedTools", agent.disallowed.join(","));
     this.agentKey = agent?.key || "";
@@ -235,7 +240,7 @@ class Chat {
     }
     const s = this.settings();
     const claude = new Claude({
-      cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt, agent: this.p.launchAgent(s.mode),
+      cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt, agent: this.p.launchAgent(s.mode), dirs: s.dirs || [],
       onMessage: (m) => this.claude === claude && this.handle(m), // lines a killed process still had buffered are dropped
       onExit: (err) => {
         if (this.claude !== claude) return;
@@ -247,8 +252,10 @@ class Chat {
       },
     });
     claude.model = s.model;
+    claude.memory = this.p.memoryStamp;
     this.claude = claude;
-    claude.request({ subtype: "initialize", promptSuggestions: true, hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
+    claude.request({ subtype: "initialize", promptSuggestions: true, hooks: { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [PRE_BASH] }],
+      PostToolUse: [{ matcher: "Edit|MultiEdit|Write|NotebookEdit", hookCallbackIds: [POST_EDIT] }] } }).then((r) => { this.p.onInit(r); this.refreshThreshold(); });
     this.syncSettings();
     return claude;
   }
@@ -337,8 +344,10 @@ class Chat {
       this.holding = false;
       if (!this.busy) return; // stopped meanwhile
     }
-    if (this.claude && ((this.claude.effort || "") !== this.settings().effort || this.claude.compactAt !== autoCompactAt()
-      || this.claude.agentKey !== this.p.launchAgent(this.settings().mode).key)) this.restart(); // launch flags
+    const s = this.settings(), cfg = vscode.workspace.getConfiguration("bitsmith");
+    if (this.claude && ((this.claude.effort || "") !== s.effort || this.claude.compactAt !== autoCompactAt()
+      || this.claude.agentKey !== this.p.launchAgent(s.mode).key || this.claude.dirsKey !== (s.dirs || []).join("\n")
+      || this.claude.fallback !== (cfg.get("fallbackModel") || "") || this.claude.memory !== this.p.memoryStamp)) this.restart(); // launch flags, and CLAUDE.md is read at launch
     const claude = this.ensure();
     this.syncSettings();
     this.started = Date.now();
@@ -346,7 +355,8 @@ class Chat {
     if (checkpoint != null) this.checkpoints.push({ id: checkpoint, key: `${this.lastUuid || "start"}#${this.userCount}`, sessionId: this.sessionId, resumeAt: this.lastUuid, snaps: new Map() });
     this.userCount++;
     const content = images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } }));
-    content.push({ type: "text", text: this.p.withContext(text, context, useActive) });
+    content.push({ type: "text", text: this.p.withContext(text, context, useActive, this.shellNotes) });
+    this.shellNotes = [];
     claude.write({ type: "user", message: { role: "user", content } });
   }
 
@@ -428,7 +438,7 @@ class Chat {
       this.idleCompact(m);
     } else if (m.type === "control_request") {
       if (m.request.subtype === "can_use_tool") this.ask(m.request_id, m.request);
-      else if (m.request.subtype === "hook_callback") this.preBash(m.request_id, m.request);
+      else if (m.request.subtype === "hook_callback") m.request.callback_id === POST_EDIT ? this.postEdit(m.request_id, m.request) : this.preBash(m.request_id, m.request);
       else this.claude?.write({ type: "control_response", response: { subtype: "error", request_id: m.request_id, error: "Not supported" } });
     }
   }
@@ -553,6 +563,60 @@ class Chat {
     claude?.write({ type: "control_response", response: { subtype: "success", request_id: id, response: {} } });
   }
 
+  // After an edit (the CLI waits for this): the errors VS Code's language servers now see in the file go back to Claude,
+  // so it fixes what it broke. Language servers mostly check open files only, hence openTextDocument.
+  // ponytail: a file no language server checks waits the full 1.5 s; skip by language if that gets noticeable.
+  async postEdit(id, req) {
+    const claude = this.claude;
+    let response = {};
+    try {
+      const t = req.input?.tool_input || {};
+      const file = t.file_path || t.notebook_path;
+      if (file && this.p.inFolder(file) && vscode.workspace.getConfiguration("bitsmith").get("diagnostics")) {
+        const uri = vscode.Uri.file(file);
+        await new Promise((resolve) => {
+          const sub = vscode.languages.onDidChangeDiagnostics((e) => e.uris.some((u) => u.fsPath === uri.fsPath) && done());
+          const timer = setTimeout(() => done(), 1500);
+          function done() { sub.dispose(); clearTimeout(timer); resolve(); }
+          vscode.workspace.openTextDocument(uri).then(null, done);
+        });
+        const errors = vscode.languages.getDiagnostics(uri).filter((d) => d.severity === vscode.DiagnosticSeverity.Error).slice(0, 10);
+        if (errors.length) response = { hookSpecificOutput: { hookEventName: "PostToolUse",
+          additionalContext: `VS Code reports these errors in ${this.rel(file)} after the edit:\n` +
+            errors.map((d) => `- line ${d.range.start.line + 1}: ${d.message}${d.source ? ` (${d.source})` : ""}`).join("\n") } };
+      }
+    } catch {}
+    claude?.write({ type: "control_response", response: { subtype: "success", request_id: id, response } });
+  }
+
+  // "!command" in the input: it runs in the folder's shell right away, and its output goes along with the next message.
+  shell(command) {
+    if (!this.folder || !command) return;
+    exec(command, { cwd: this.folder, timeout: 120000, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+      const output = (stdout + stderr).trimEnd().slice(-20000);
+      const code = err ? (typeof err.code === "number" ? err.code : err.killed ? "timed out" : 1) : 0;
+      (this.shellNotes ||= []).push({ command, output, code });
+      this.post({ type: "shell", command, output, code });
+    });
+  }
+
+  // "/btw question": a quick answer from a throwaway fork of this conversation, without tools,
+  // while the chat itself carries on. Nothing is saved, as in Claude Code.
+  btw(text) {
+    const id = Math.random().toString(36).slice(2), s = this.settings();
+    this.post({ type: "btw", id, text });
+    const args = ["-p", "--no-session-persistence", "--tools", "", "--output-format", "text"];
+    if (this.sessionId) args.push("--resume", this.sessionId, "--fork-session");
+    if (s.model && s.model !== "default") args.push("--model", s.model);
+    args.push(`Side question (answer briefly from what you already know, then stop; don't continue the task): ${text}`);
+    let out = "", errText = "";
+    const p = spawn(claudeBin(), args, { cwd: this.folder || os.homedir(), env: process.env });
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (errText += d));
+    p.on("error", (e) => (errText = e.message));
+    p.on("close", (code) => this.post({ type: "btwAnswer", id, ...(code || !out.trim() ? { error: errText.trim() || `Claude Code exited (${code})` } : { answer: out.trim() }) }));
+  }
+
   // After the command: what changed since its snapshots becomes reviewable and restorable.
   async captureShell(marks) {
     const touched = [];
@@ -616,14 +680,24 @@ class Chat {
     const what = [edited && `${plural(edited, "file")} the agent edited`, shell && `${plural(shell, "file")} changed by commands`].filter(Boolean).join(" and ") || "no files";
     // Editing a message only needs a confirm when files would be reverted; a plain restore always asks.
     if (!edit || files.size || (retry && messages > 1)) {
+      const choose = !edit && files.size; // a plain restore can keep either side, like Claude Code's rewind
       const pick = await vscode.window.showWarningMessage(
         retry
           ? `Retry this message? This reverts ${what} from this message on${messages > 1 ? ` and removes the ${plural(messages - 1, "message")} after it` : ""}.`
           : edit
           ? `Edit and resend? This reverts ${what} from this message on and removes ${plural(messages, "message")}.`
           : `Restore checkpoint? This removes ${plural(messages, "message")} and reverts ${what} since then.`,
-        { modal: true, detail: "Command changes come from git snapshots, so edits to untracked or ignored files that already existed aren't covered." }, retry ? "Retry" : edit ? "Edit and resend" : "Restore");
+        { modal: true, detail: "Command changes come from git snapshots, so edits to untracked or ignored files that already existed aren't covered." +
+          (choose ? "\n\nConversation only: keep the files as they are now. Code only: keep the messages; this one can't be redone." : "") },
+        ...(retry ? ["Retry"] : edit ? ["Edit and resend"] : choose ? ["Restore", "Conversation only", "Code only"] : ["Restore"]));
       if (!pick) return this.post({ type: "editCancelled", checkpoint: id });
+      if (pick === "Code only") {
+        if (this.busy) return;
+        await this.writeFiles(files);
+        this.edits.refresh();
+        return this.post({ type: "notice", icon: "discard", text: `Reverted ${what} to before this message; the conversation is unchanged.` });
+      }
+      if (pick === "Conversation only") files.clear();
     }
     if (this.busy) return this.post({ type: "editCancelled", checkpoint: id }); // Claude started replying meanwhile
     const after = new Map(); // bytes, so binary files survive a redo
@@ -1304,6 +1378,10 @@ class ChatProvider {
       case "deleteChat": return c.sessionId ? this.deleteSession(c.sessionId) : vscode.window.showInformationMessage("This chat hasn't been saved yet.");
       case "exportChat": return this.exportChat(c);
       case "send": return c.send(m);
+      case "shell": return c.shell(m.command);
+      case "btw": return c.btw(m.text);
+      case "memory": return this.memory(c, m.text);
+      case "addDir": return this.addDir(c);
       case "stop": return c.interrupt();
       case "open": return this.openPath(c, m.file, m.line, m.end);
       case "openImage": return openImage(m.mediaType, m.data);
@@ -1322,6 +1400,11 @@ class ChatProvider {
       case "undoStep": return c.undoStep(m);
       case "turnDiff": return c.turnDiff(m);
       case "copy": return vscode.env.clipboard.writeText(m.text);
+      case "insertCode": return this.insertCode(m.text);
+      case "applyCode": { // Claude does the merge: a code block is usually a fragment, and its edit then lands in Keep/Undo
+        const f = this.activeFile();
+        return c.post({ type: "quickAction", text: `Apply this code to ${f ? `\`${f.rel}\`` : "the file it belongs to"}:\n\n\`\`\`${m.lang || ""}\n${m.text.replace(/\n$/, "")}\n\`\`\``, items: [] });
+      }
       case "history": return this.history();
       case "loadSession": return this.openSession(m.id);
       case "deleteSession": return this.deleteSession(m.id);
@@ -1396,6 +1479,54 @@ class ChatProvider {
     if (key === "model" || key === "mode") c.syncSettings(); // the chat it was changed in (an editor tab's isn't the sidebar's)
   }
 
+  // "# note" saves a line to a CLAUDE.md; "/memory" (no text) opens one. Running chats reread it on their next message.
+  async memory(c, text) {
+    const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    const items = [
+      this.folder && { label: "Project memory", description: "CLAUDE.md · shared with the repo", file: path.join(this.folder, "CLAUDE.md") },
+      this.folder && { label: "Project memory (local)", description: "CLAUDE.local.md · just you", file: path.join(this.folder, "CLAUDE.local.md") },
+      { label: "User memory", description: "~/.claude/CLAUDE.md · all your projects", file: path.join(home, "CLAUDE.md") },
+    ].filter(Boolean);
+    const pick = await vscode.window.showQuickPick(items, { title: text ? `Save to memory: ${text}` : "Open memory file", placeHolder: "Which CLAUDE.md?" });
+    if (!pick) return;
+    if (!text) {
+      if (!fs.existsSync(pick.file)) { fs.mkdirSync(path.dirname(pick.file), { recursive: true }); fs.writeFileSync(pick.file, ""); }
+      this.memoryStamp = (this.memoryStamp || 0) + 1; // edited there, probably
+      return openFile(pick.file);
+    }
+    const old = readText(pick.file) || "";
+    fs.mkdirSync(path.dirname(pick.file), { recursive: true });
+    fs.writeFileSync(pick.file, old + (old && !old.endsWith("\n") ? "\n" : "") + `- ${text}\n`);
+    this.memoryStamp = (this.memoryStamp || 0) + 1;
+    c.post({ type: "notice", icon: "book", text: `Saved to ${pick.label.toLowerCase()} (${path.basename(pick.file)}): ${text}` });
+  }
+
+  // "/add-dir": folders beyond the workspace this chat's Claude may read without asking (edits there still ask).
+  async addDir(c) {
+    const dirs = c.prefs().dirs || [];
+    let keep = dirs;
+    if (dirs.length) {
+      const add = { label: "$(add) Add a folder…", add: true };
+      const picked = await vscode.window.showQuickPick([...dirs.map((d) => ({ label: d, picked: true })), add],
+        { canPickMany: true, title: "Extra folders for this chat", placeHolder: "Untick a folder to remove it" });
+      if (!picked) return;
+      keep = picked.filter((p) => !p.add).map((p) => p.label);
+      if (!picked.includes(add)) return this.setDirs(c, keep);
+    }
+    const uris = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: true, openLabel: "Add to chat",
+      defaultUri: this.folder ? vscode.Uri.file(path.dirname(this.folder)) : undefined });
+    this.setDirs(c, [...new Set([...keep, ...(uris || []).map((u) => u.fsPath)])]);
+  }
+
+  setDirs(c, dirs) {
+    const before = c.prefs().dirs || [];
+    if (before.join("\n") === dirs.join("\n")) return;
+    c.prefs().dirs = dirs;
+    c.savePrefs();
+    const name = (d) => (this.folder ? path.relative(this.folder, d) : d);
+    c.post({ type: "notice", icon: "folder", text: dirs.length ? `Claude can read ${dirs.map(name).join(", ")} without asking; edits there still ask. Applies from the next message.` : "No extra folders for this chat any more." });
+  }
+
   // ---- open chats ----
 
   createChat() {
@@ -1468,8 +1599,9 @@ class ChatProvider {
     if (c === this.active && this.view) this.view.description = c.title || undefined;
   }
 
-  withContext(text, items, useActive) {
+  withContext(text, items, useActive, shellNotes = []) {
     const out = [];
+    for (const n of shellNotes) out.push(`I ran \`${n.command}\` in the folder (exit ${n.code}):`, "```\n" + (n.output || "(no output)") + "\n```");
     const active = useActive && this.activeFile();
     if (active) {
       out.push(`Current file: ${active.rel}${active.selection ? ` (lines ${active.selection.start}-${active.selection.end} selected)` : ""}`);
@@ -1623,6 +1755,28 @@ class ChatProvider {
     const e = vscode.window.activeTextEditor;
     if (!e || e.selection.isEmpty) return;
     this.addItems([{ kind: "selection", file: e.document.uri.fsPath, rel: this.rel(e.document.uri.fsPath), start: e.selection.start.line + 1, end: e.selection.end.line + 1, text: e.document.getText(e.selection) }]);
+  }
+
+  // Explain / Fix / Tests from the editor: the selection (or the lightbulb's error lines, or else the whole file) goes to the chat with a ready prompt.
+  quickAction(kind, uri, diag) {
+    const e = vscode.window.activeTextEditor;
+    const doc = uri ? vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString()) : e?.document;
+    if (!doc || doc.uri.scheme !== "file") return;
+    const sel = !diag && e?.document === doc && !e.selection.isEmpty ? e.selection : null;
+    const [from, to] = diag ? [diag.range.start.line, diag.range.end.line] : sel ? [sel.start.line, sel.end.line] : [];
+    const file = doc.uri.fsPath, rel = this.rel(file);
+    const items = [from != null ? { kind: "selection", file, rel, start: from + 1, end: to + 1, text: doc.getText(sel || new vscode.Range(from, 0, to + 1, 0)) } : { kind: "file", file, rel }];
+    const text = kind === "explain" ? "Explain this code." : kind === "tests" ? "Write tests for this code, following the project's existing test setup."
+      : diag ? `Fix this error at line ${diag.range.start.line + 1}: ${diag.message}${diag.source ? ` (${diag.source})` : ""}` : "Fix this code.";
+    vscode.commands.executeCommand("bitsmith.chat.focus");
+    this.active.post({ type: "quickAction", text, items });
+  }
+
+  // A code block's "Insert at cursor": into the editor last used, replacing its selection. Ctrl+Z takes it back out.
+  async insertCode(text) {
+    const e = vscode.window.activeTextEditor || vscode.window.visibleTextEditors.find((x) => x.document.uri.fsPath === this.lastFile);
+    if (!e) return vscode.window.showInformationMessage("Open a file first; the code goes in at its cursor.");
+    await e.edit((b) => b.replace(e.selection, text));
   }
 
   async pickContext(c) {
@@ -2386,6 +2540,15 @@ function activate(context) {
     vscode.commands.registerCommand("bitsmith.addContext", () => provider.pickContext()),
     vscode.commands.registerCommand("bitsmith.addToChat", (uri, uris) => provider.addUris(uris?.length ? uris : uri ? [uri] : [])),
     vscode.commands.registerCommand("bitsmith.addSelection", () => provider.addSelection()),
+    ...["explain", "fix", "tests"].map((k) => vscode.commands.registerCommand(`bitsmith.${k}`, (uri, diag) => provider.quickAction(k, uri?.scheme ? uri : null, diag))),
+    vscode.languages.registerCodeActionsProvider({ scheme: "file" }, {
+      provideCodeActions: (doc, range, ctx) => ctx.diagnostics.filter((d) => d.severity <= vscode.DiagnosticSeverity.Warning).slice(0, 3).map((d) => {
+        const a = new vscode.CodeAction(`Fix with Bitsmith: ${d.message.split("\n")[0].slice(0, 60)}`, vscode.CodeActionKind.QuickFix);
+        a.command = { title: "Fix with Bitsmith", command: "bitsmith.fix", arguments: [doc.uri, d] };
+        a.diagnostics = [d];
+        return a;
+      }),
+    }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }),
     vscode.commands.registerCommand("bitsmith.showBrowser", () => {
       const live = [provider.active, ...provider.chats.values()].map((c) => c.claude?.browserState).filter((f) => f && fs.existsSync(f));
       live.length ? showBrowser(live[0]) : vscode.window.showInformationMessage("No chat has the browser open. Turn on Settings → Bitsmith → Browser and ask Claude to open a page.");

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.27.0
+
+- **Explain / Fix / Tests:** right-click a selection in the editor to send it to the chat with a ready prompt. On an
+  error or warning, the lightbulb offers **Fix with Bitsmith**. Whatever you were typing in the chat stays put.
+- **Code block buttons:** **Insert at cursor** puts the code into the editor you last used (Ctrl+Z takes it out).
+  **Apply to file** asks Claude to merge it into that file, so the change shows up in Keep/Undo.
+- **Edits grouped:** back-to-back edits to the same file show as one row, "Edited x +a −b · 3 edits", which opens to
+  each edit.
+- **Change navigation:** files with changes waiting show ↑ ↓ ✓ ↺ in the editor title bar (previous change, next change,
+  Keep, Undo). Alt+F5 / Shift+Alt+F5 jump between changes in those files and go on to the next changed file.
+
+## 1.26.1
+
+- **Fix:** the Proposed plan card rendered all its text small, bold and blue (it picked up the usage panel's plan-badge
+  style).
+
+## 1.26.0
+
+- **Claude sees VS Code's errors:** after each edit, the errors VS Code shows for that file (Problems panel) go back to
+  Claude so it fixes what it broke. Turn off with `bitsmith.diagnostics`.
+- **Memory:** start a message with `#` to save a note to a CLAUDE.md (project, local or user). `/memory` opens one.
+- **`/add-dir`:** let a chat read folders outside the workspace without asking. Edits there still ask.
+- **`!command`:** runs in the folder right away. The output shows in the chat and goes along with your next message.
+- **`/btw question`:** a quick side answer from the conversation so far, while the reply carries on. It isn't saved.
+- **Backup model:** when the chat's model is overloaded, the reply goes on with Sonnet (`bitsmith.fallbackModel`).
+- **Restore checkpoint choices:** restore the conversation and code, the conversation only, or the code only.
+
 ## 1.25.2
 
 - **Alt+↑ / Alt+↓ stay on messages while older ones load:** loading earlier messages no longer nudges the view off

@@ -32,7 +32,7 @@ marked.use({
   renderer: {
     html: ({ text }) => escapeHtml(text),
     code: ({ text, lang }) =>
-      `<div class="codeblock"><div class="codebar"><span>${escapeHtml(lang || "")}</span><button class="icon-btn copy-code" title="Copy"><i class="codicon codicon-copy"></i></button></div><pre><code>${highlight(text, lang)}</code></pre></div>`,
+      `<div class="codeblock" data-lang="${escapeHtml(lang || "")}"><div class="codebar"><span class="grow">${escapeHtml(lang || "")}</span><button class="icon-btn insert-code" title="Insert at cursor"><i class="codicon codicon-insert"></i></button><button class="icon-btn apply-code" title="Apply to file: Claude makes the edit"><i class="codicon codicon-wand"></i></button><button class="icon-btn copy-code" title="Copy"><i class="codicon codicon-copy"></i></button></div><pre><code>${highlight(text, lang)}</code></pre></div>`,
     codespan: ({ text }) => {
       const raw = text; // marked passes code text unescaped
       if (looksLikePath(raw)) {
@@ -360,14 +360,22 @@ function autosize() {
   input.style.height = Math.min(input.scrollHeight, 240) + "px";
 }
 let slashIndex = 0;
+// Bitsmith's own commands, handled here instead of going to Claude (see localCommand).
+const LOCAL_COMMANDS = [
+  { name: "btw", hint: "<question>", description: "Ask a quick side question; the reply carries on and nothing is saved" },
+  { name: "add-dir", description: "Let Claude read folders outside this workspace in this chat" },
+  { name: "memory", description: "Open a CLAUDE.md memory file (or start a message with # to save a note)" },
+];
 function slashMatches() {
   const m = input.value.match(/^\/([\w:.-]*)$/);
   if (!m) return [];
   const q = m[1].toLowerCase();
-  return S.commands.filter((c) => c.name.toLowerCase().includes(q)).sort((a, b) => a.name.toLowerCase().indexOf(q) - b.name.toLowerCase().indexOf(q)).slice(0, 8);
+  return [...LOCAL_COMMANDS, ...S.commands.filter((c) => !LOCAL_COMMANDS.some((l) => l.name === c.name))].filter((c) => c.name.toLowerCase().includes(q)).sort((a, b) => a.name.toLowerCase().indexOf(q) - b.name.toLowerCase().indexOf(q)).slice(0, 8);
 }
 function renderSlash() {
   if (mention) return renderMention();
+  const hint = /^#(?!#)[^\n]*$/.test(input.value) ? "Enter: save this note to a CLAUDE.md memory file" : /^![^\n]/.test(input.value) ? "Enter: run this command in the folder; its output goes with your next message" : "";
+  if (hint) return slash.classList.remove("hidden"), slash.replaceChildren(h("div", { class: "menu-title" }, hint));
   const list = slashMatches();
   slash.classList.toggle("hidden", !list.length);
   slashIndex = Math.max(0, Math.min(slashIndex, list.length - 1));
@@ -812,6 +820,25 @@ function stepResult(m) {
   const took = (m.at || Date.now()) - el.dataset.start;
   if (took >= 1000) meta.append(h("span", { class: "muted took" }, `${meta.textContent ? " · " : ""}${took < 60000 ? (took / 1000).toFixed(1) + "s" : elapsed(Date.now() - took)}`));
   if (m.isError && m.error) el.title = m.error;
+  if (m.rows?.length && m.edit && !m.parent) groupEdit(el.parentElement);
+}
+
+// Back-to-back edits to one file read as one row, "Edited x +a −b · 3 edits", that opens to each edit's own step.
+function groupEdit(box) {
+  const file = box.stepEdit.input.file_path, prev = box.previousElementSibling;
+  let group = prev?.classList.contains("edit-group") && prev.file === file ? prev : null;
+  if (!group) {
+    if (prev?.stepEdit?.input.file_path !== file || prev.querySelector(":scope > .step.error")) return;
+    const row = prev.firstElementChild.cloneNode(true);
+    row.removeAttribute("data-id");
+    group = h("details", { class: "step-box edit-group has-body" }, row, h("div", { class: "step-body edit-steps" }));
+    group.file = file;
+    prev.before(group);
+    $(".edit-steps", group).append(prev);
+  }
+  $(".edit-steps", group).append(box);
+  const boxes = [...$(".edit-steps", group).children], sum = (k) => boxes.reduce((n, b) => n + (b.stepStats?.[k] || 0), 0);
+  $(".meta", group.firstElementChild).replaceChildren(h("span", { class: "add" }, `+${sum("added")}`), h("span", { class: "del" }, `-${sum("removed")}`), h("span", { class: "muted" }, ` · ${boxes.length} edits`));
 }
 
 // Thinking often arrives without visible text; only show a row once there is something to read.
@@ -1101,9 +1128,11 @@ function submit() {
   const a = S.useActive && !activeIsAttached() && S.active;
   const chipsShown = [...(a ? [{ kind: "file", rel: a.rel, file: a.file, range: a.selection ? `${a.selection.start}-${a.selection.end}` : "" }] : []), ...S.items];
   const payload = { text: text || "See the attached image.", images: S.images, items: S.items, useActive: !!a, chips: chipsShown };
+  const local = !cur.editing && !S.images.length && localCommand(text); // works while Claude is replying too
   // the input stays filled until the extension has restored the checkpoint (its confirm can be cancelled)
-  if (cur.editing) return void (!S.busy && (cur.editing.sent = payload, send({ type: "editMessage", checkpoint: cur.editing.checkpoint, text: payload.text })));
-  if (S.busy) { cur.queue.push(payload); renderQueue(); } // sent when this reply ends, like typing ahead in the terminal
+  if (!local && cur.editing) return void (!S.busy && (cur.editing.sent = payload, send({ type: "editMessage", checkpoint: cur.editing.checkpoint, text: payload.text })));
+  if (local) {}
+  else if (S.busy) { cur.queue.push(payload); renderQueue(); } // sent when this reply ends, like typing ahead in the terminal
   else dispatch(payload);
   if (text) {
     const hist = (vscode.getState()?.history || []).filter((t) => t !== text).concat(text).slice(-100);
@@ -1111,13 +1140,23 @@ function submit() {
   }
   histAt = -1;
   input.value = "";
-  S.items = [];
-  S.images = [];
+  if (!local) { S.items = []; S.images = []; } // attached files wait for the next real message
   autosize();
   renderChips();
   drawThumbs();
   mention = null;
   renderSlash();
+}
+
+// "/btw …", "/add-dir", "/memory", "# note" and "!command" are Bitsmith's to handle. True when `text` was one of them.
+function localCommand(text) {
+  const cmd = text.match(/^\/(btw|add-dir|memory)(?:\s+([\s\S]*))?$/);
+  if (cmd?.[1] === "btw") return !!cmd[2] && (send({ type: "btw", text: cmd[2] }), true);
+  if (cmd?.[1] === "add-dir") return send({ type: "addDir" }), true;
+  if (cmd?.[1] === "memory") return send({ type: "memory" }), true;
+  if (/^#(?!#)[^\n]*$/.test(text) && text.slice(1).trim()) return send({ type: "memory", text: text.slice(1).trim() }), true;
+  if (/^!\s*\S/.test(text)) return send({ type: "shell", command: text.slice(1).trim() }), true;
+  return false;
 }
 
 function renderQueue() {
@@ -1214,6 +1253,11 @@ document.addEventListener("click", (e) => {
     send({ type: "copy", text: copy.closest(".codeblock").querySelector("code").textContent });
     copy.replaceChildren(icon("check"));
     setTimeout(() => copy.replaceChildren(icon("copy")), 1200);
+  }
+  const use = e.target.closest(".insert-code, .apply-code");
+  if (use) {
+    const block = use.closest(".codeblock");
+    send({ type: use.classList.contains("insert-code") ? "insertCode" : "applyCode", text: block.querySelector("code").textContent, lang: block.dataset.lang });
   }
 });
 
@@ -1439,6 +1483,20 @@ function handle(m) {
     case "queue": cur.queue = (m.items || []).map((p) => ({ images: [], items: [], chips: [], ...p })); return renderQueue();
     case "context": cur.context = { used: m.used, window: m.window, threshold: m.threshold }; return renderMeter();
     case "notice": return eventRow(h("div", { class: "task-event notice" }, icon(m.icon || "info"), h("span", { class: "grow" }, m.text)), m.icon === "fold");
+    case "shell": return eventRow(h("div", { class: "task-event shell" },
+      h("div", { class: "shell-head" }, icon("terminal"), h("code", { class: "grow ellipsis", title: m.command }, "$ " + m.command),
+        h("span", { class: m.code === 0 ? "ok" : "del" }, m.code === 0 ? "exit 0" : `exit ${m.code}`), h("span", { class: "muted small" }, "· goes with your next message")),
+      m.output && h("pre", {}, m.output)), true);
+    case "btw": return eventRow(h("div", { class: "task-event btw", "data-btw": m.id },
+      h("div", { class: "shell-head" }, icon("comment"), h("b", {}, "btw"), h("span", { class: "grow ellipsis", title: m.text }, m.text), icon("loading", "spin"),
+        h("button", { class: "icon-btn", title: "Dismiss", onclick: (e) => e.target.closest(".btw").remove() }, icon("close")))), true);
+    case "btwAnswer": {
+      const el = document.querySelector(`[data-btw="${CSS.escape(m.id)}"]`);
+      if (!el) return;
+      $(".spin", el)?.remove();
+      el.append(m.error ? h("div", { class: "del small" }, m.error) : h("div", { class: "md", html: md(m.answer) }));
+      return scrollDown();
+    }
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
@@ -1448,6 +1506,13 @@ function handle(m) {
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
     case "activeFile": S.active = m.file; return renderChips();
     case "addContext": return addItems(m.items);
+    case "quickAction": { // Explain / Fix / Tests or a code block's Apply: sent as is, the draft in the input stays
+      if (cur.loading) return;
+      const items = m.items.map((it) => ({ ...it, range: it.kind === "selection" ? `${it.start}-${it.end}` : "" }));
+      const p = { text: m.text, images: [], items, useActive: false, chips: items };
+      if (S.busy) { cur.queue.push(p); renderQueue(); } else dispatch(p);
+      return;
+    }
     case "planText": { // approved after editing: show what is being built
       const el = document.querySelector(`[data-plan="${CSS.escape(m.id)}"]`);
       if (el) { el.querySelector(".md").innerHTML = md(m.plan); el.querySelector(".card-title").lastChild.textContent = "Proposed plan (edited)"; }

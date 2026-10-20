@@ -125,6 +125,11 @@ class EditTracker {
       vscode.commands.registerCommand("bitsmith.keepHunk", (file, h) => this.keepHunk(file, h)),
       vscode.commands.registerCommand("bitsmith.undoHunk", (file, h) => this.undoHunk(file, h)),
       vscode.commands.registerCommand("bitsmith.diffFile", (file) => this.showDiff(file)),
+      // the editor title bar's arrows, Keep and Undo, shown on files with changes waiting (and Alt+F5 / Shift+Alt+F5)
+      vscode.commands.registerCommand("bitsmith.nextChange", () => this.goChange(1)),
+      vscode.commands.registerCommand("bitsmith.prevChange", () => this.goChange(-1)),
+      vscode.commands.registerCommand("bitsmith.keepEditor", (uri) => { const f = (uri || vscode.window.activeTextEditor?.document.uri)?.fsPath; if (f) this.keep(f); }),
+      vscode.commands.registerCommand("bitsmith.undoEditor", (uri) => { const f = (uri || vscode.window.activeTextEditor?.document.uri)?.fsPath; if (f) this.undo(f); }),
       // Source Control view: a row's or a group's inline Keep / Undo, for the clicked or selected rows
       vscode.commands.registerCommand("bitsmith.scmKeep", (...a) => this.keep(scmFiles(a))),
       vscode.commands.registerCommand("bitsmith.scmUndo", (...a) => this.undo(scmFiles(a))),
@@ -219,8 +224,25 @@ class EditTracker {
       this.lensEmitter.fire();
       const files = this.files();
       this.showInScm(files);
+      vscode.commands.executeCommand("setContext", "bitsmith.changed", files.map((f) => f.file));
       this.onChange(files);
     }, 100);
+  }
+
+  // The next (dir 1) or previous (-1) change from the cursor, going on through the other changed files and wrapping.
+  async goChange(dir) {
+    const files = this.files().filter((f) => !f.binary && !f.deleted).map((f) => f.file);
+    const all = files.flatMap((file, n) => this.hunks(file).map((h) => ({ file, line: h.nStart, key: n * 1e9 + h.nStart })));
+    if (!all.length) return;
+    const e = vscode.window.activeTextEditor, n = e ? files.indexOf(e.document.uri.fsPath) : -1;
+    const at = n >= 0 ? n * 1e9 + e.selection.active.line : -1;
+    let i = dir > 0 ? all.findIndex((x) => x.key > at) : all.findLastIndex((x) => x.key < at);
+    if (i < 0) i = dir > 0 ? 0 : all.length - 1;
+    const ed = await vscode.window.showTextDocument(vscode.Uri.file(all[i].file), { preview: false });
+    const pos = new vscode.Position(Math.min(all[i].line, ed.document.lineCount - 1), 0);
+    ed.selection = new vscode.Selection(pos, pos);
+    ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    vscode.window.setStatusBarMessage(`Bitsmith: change ${i + 1} of ${all.length}`, 3000);
   }
 
   decorate() {

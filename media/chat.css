@@ -325,7 +325,7 @@ body.busy .edit-btn { display: none; }
 .usage-card { position: fixed; right: 10px; bottom: 10px; z-index: 80; width: min(330px, calc(100vw - 20px)); padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; border-radius: 10px; border: 1px solid var(--vscode-editorHoverWidget-border, var(--border)); background: var(--vscode-editorHoverWidget-background, var(--surface)); box-shadow: 0 12px 32px rgba(0,0,0,.4); animation: fadein .14s ease-out; }
 .usage-head { display: flex; align-items: center; gap: 8px; }
 .head-logo { font-size: 18px; color: var(--vscode-textLink-foreground); }
-.plan { font-size: 0.82em; padding: 1px 7px; border-radius: 10px; background: color-mix(in srgb, var(--vscode-textLink-foreground) 18%, transparent); color: var(--vscode-textLink-foreground); font-weight: 600; }
+.usage-head .plan { font-size: 0.82em; padding: 1px 7px; border-radius: 10px; background: color-mix(in srgb, var(--vscode-textLink-foreground) 18%, transparent); color: var(--vscode-textLink-foreground); font-weight: 600; }
 .usage-row { display: flex; flex-direction: column; gap: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
 .usage-line { display: flex; align-items: baseline; gap: 6px; }
 .usage-num .big { font-size: 1.45em; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -373,11 +373,16 @@ body.busy .edit-btn { display: none; }
 .task-event .ok { color: var(--add); }
 .task-event .del { color: var(--del); }
 .task-event .link-btn { flex: none; }
+/* "!command" output and "/btw" answers: a header row with the body under it */
+.task-event.shell, .task-event.btw { flex-direction: column; align-items: stretch; }
+.shell-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.task-event.shell pre { margin: 4px 0 2px; max-height: 200px; overflow: auto; white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.95em; color: var(--fg); }
+.task-event.btw .md { color: var(--fg); padding: 2px 0; }
 .step.flash { background: var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,.33)); transition: background .4s; }
 
-/* a sub-agent's own steps, nested in its Agent step */
-.substeps { margin: 2px 0 6px; padding-left: 8px; border-left: 2px solid var(--border); }
-.substeps .step { font-size: 0.93em; min-height: 22px; }
+/* a sub-agent's own steps, nested in its Agent step; back-to-back edits to one file, nested in their group */
+.substeps, .edit-steps { margin: 2px 0 6px; padding-left: 8px; border-left: 2px solid var(--border); }
+.substeps .step, .edit-steps .step { font-size: 0.93em; min-height: 22px; }
 
 /* code tokens: Dark+ / Light+ colors */
 .tk-k { color: #569cd6; } .tk-s { color: #ce9178; } .tk-n { color: #b5cea8; } .tk-c { color: #6a9955; font-style: italic; }
