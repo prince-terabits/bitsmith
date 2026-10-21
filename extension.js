@@ -95,7 +95,7 @@ function autoCompactAt() {
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
-  constructor({ cwd, model, effort, resume, resumeAt, agent, dirs = [], onMessage, onExit }) {
+  constructor({ cwd, model, effort, ultracode, resume, resumeAt, agent, dirs = [], onMessage, onExit }) {
     const cfg = vscode.workspace.getConfiguration("bitsmith");
     const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
@@ -122,11 +122,15 @@ class Claude {
     const compactAt = autoCompactAt();
     // next-message guesses (without it they stop once plan usage passes 75%), and the task tools behind the Todos panel
     const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1", CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" };
+    const settings = {};
     if (compactAt === "off") env.DISABLE_AUTO_COMPACT = "1";
     else {
       if (/^\d+$/.test(compactAt)) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = compactAt;
-      args.push("--settings", JSON.stringify({ precomputeCompactionEnabled: true })); // the summary is mostly ready when it's needed
+      settings.precomputeCompactionEnabled = true; // the summary is mostly ready when it's needed
     }
+    if (ultracode) settings.ultracode = true; // big tasks run as multi-agent workflows, at any effort
+    if (Object.keys(settings).length) args.push("--settings", JSON.stringify(settings));
+    this.ultracode = !!ultracode;
     this.compactAt = compactAt;
     this.effort = effort;
     this.waiting = new Map();
@@ -217,9 +221,9 @@ class Chat {
   // Model, effort and mode belong to the chat: a new one starts from the last picked, a reopened one gets its own back.
   prefs() {
     if (this._prefs) return this._prefs;
-    const { model, effort, mode } = this.p.settings();
+    const { model, effort, ultracode, mode } = this.p.settings();
     const saved = this.sessionId && this.p.ws.get("chatPrefs")?.[this.sessionId];
-    return (this._prefs = { model, effort, mode, ...saved, ...(saved?.mode === "plan" && { mode: "agent" }) });
+    return (this._prefs = { model, effort, ultracode, mode, ...saved, ...(saved?.mode === "plan" && { mode: "agent" }) });
   }
   // ponytail: one small entry per chat ever tuned, never pruned; trim it alongside session deletes if it grows.
   savePrefs() {
@@ -240,7 +244,7 @@ class Chat {
     }
     const s = this.settings();
     const claude = new Claude({
-      cwd: this.folder, model: s.model, effort: s.effort, resume: this.sessionId, resumeAt: this.resumeAt, agent: this.p.launchAgent(s.mode), dirs: s.dirs || [],
+      cwd: this.folder, model: s.model, effort: s.effort, ultracode: s.ultracode, resume: this.sessionId, resumeAt: this.resumeAt, agent: this.p.launchAgent(s.mode), dirs: s.dirs || [],
       onMessage: (m) => this.claude === claude && this.handle(m), // lines a killed process still had buffered are dropped
       onExit: (err) => {
         if (this.claude !== claude) return;
@@ -345,7 +349,7 @@ class Chat {
       if (!this.busy) return; // stopped meanwhile
     }
     const s = this.settings(), cfg = vscode.workspace.getConfiguration("bitsmith");
-    if (this.claude && ((this.claude.effort || "") !== s.effort || this.claude.compactAt !== autoCompactAt()
+    if (this.claude && ((this.claude.effort || "") !== s.effort || this.claude.ultracode !== !!s.ultracode || this.claude.compactAt !== autoCompactAt()
       || this.claude.agentKey !== this.p.launchAgent(s.mode).key || this.claude.dirsKey !== (s.dirs || []).join("\n")
       || this.claude.fallback !== (cfg.get("fallbackModel") || "") || this.claude.memory !== this.p.memoryStamp)) this.restart(); // launch flags, and CLAUDE.md is read at launch
     const claude = this.ensure();
@@ -1202,6 +1206,7 @@ class ChatProvider {
     return {
       model: this.state.get("model", "default"),
       effort: this.state.get("effort", ""),
+      ultracode: this.state.get("ultracode", false),
       mode: this.state.get("mode", "agent").replace(/^plan$/, "agent"), // Plan mode is now part of Agent
       policy: this.state.get("policy", vscode.workspace.getConfiguration("bitsmith").get("defaultPolicy")),
       agents: this.agents().map(({ value, label, description }) => ({ value, label, description })),
@@ -1485,7 +1490,7 @@ class ChatProvider {
 
   setSetting(key, value, c = this.active) {
     this.state.update(key, value); // also the starting point for new chats
-    if (["model", "effort", "mode"].includes(key)) { c.prefs()[key] = value; c.savePrefs(); }
+    if (["model", "effort", "ultracode", "mode"].includes(key)) { c.prefs()[key] = value; c.savePrefs(); }
     if (key === "model" || key === "mode") c.syncSettings(); // the chat it was changed in (an editor tab's isn't the sidebar's)
   }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.30.0
+
+- **Ultracode switch:** in the model menu, under Effort. Claude splits big tasks across several agents working in
+  parallel, then checks and merges their results, at whatever effort you picked. A rocket on the model button shows
+  it's on. Each chat keeps its own setting. Uses many more tokens.
+
 ## 1.29.1
 
 - **New logo:** code brackets with a hammer as the slash, in the activity bar, tabs, status bar, chat and README

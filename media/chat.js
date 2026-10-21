@@ -144,6 +144,13 @@ document.addEventListener("mousedown", (e) => { if (openMenu && !openMenu.contai
 function menuItems(el, options, current, onPick) {
   return options.map((o) => {
     if (o.sep) return h("div", { class: "menu-sep" });
+    if ("toggle" in o) { // a switch: flips in place, the menu stays open
+      const sw = h("span", { class: `switch ${o.toggle ? "on" : ""}` });
+      return h("div", { class: "menu-item toggle", title: o.title || "",
+        onmouseenter: () => openSub(el, null, null),
+        onclick: () => o.onToggle(sw.classList.toggle("on")) },
+        h("div", { class: "menu-text" }, h("div", {}, o.icon && icon(o.icon), o.label)), sw);
+    }
     const row = h("div", { class: `menu-item ${o.value === current ? "selected" : ""}`, title: o.title || "",
       onmouseenter: () => openSub(el, row, o.sub),
       onclick: () => { if (o.sub) return openSub(el, row, o.sub); closeMenu(); onPick(o.value); } },
@@ -208,6 +215,7 @@ const POLICIES = [
   { value: "bypass", label: "Bypass approvals", icon: "warning", description: "Nothing asks. Edits stay undoable." },
 ];
 const EFFORT_LABEL = { "": "Default", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const effortLevels = () => currentModel().supportedEffortLevels || [];
 
 function setSetting(key, value) {
   S[key] = value;
@@ -224,7 +232,8 @@ function renderToolbar() {
   modeBtn.replaceChildren(icon(mode.icon), mode.label, icon("chevron-down", "chev"));
   const model = currentModel();
   const name = model.value === "default" && model.description ? model.description.split(" · ")[0] : (model.displayName || model.value);
-  modelBtn.replaceChildren(name, S.effort && h("span", { class: "muted" }, EFFORT_LABEL[S.effort] || S.effort), icon("chevron-down", "chev"));
+  modelBtn.replaceChildren(name, S.effort && h("span", { class: "muted" }, EFFORT_LABEL[S.effort] || S.effort),
+    S.ultracode ? h("span", { class: "muted", title: "Ultracode on" }, icon("rocket")) : "", icon("chevron-down", "chev"));
   const policy = POLICIES.find((p) => p.value === S.policy) || POLICIES[0];
   policyBtn.replaceChildren(icon(policy.icon), policy.label, icon("chevron-down", "chev"));
   policyBtn.classList.toggle("danger", S.policy === "bypass");
@@ -248,16 +257,18 @@ modelBtn.onclick = () => {
   const cur = S.model === "default" ? main.find((m) => m.resolvedModel === def)?.value || "default" : S.model;
   const pick = (v) => {
     setSetting("model", v);
-    const levels = currentModel().supportedEffortLevels || [];
-    if (S.effort && !levels.includes(S.effort)) setSetting("effort", "");
+    if (S.effort && !effortLevels().includes(S.effort)) setSetting("effort", "");
   };
-  const levels = currentModel().supportedEffortLevels || [];
+  const levels = effortLevels();
   menu(modelBtn, "", [
     ...main.map((m) => ({ value: m.value, label: m.displayName || m.value, description: m.description })),
     levels.length && { sep: true },
     levels.length && { value: "effort", label: "Effort", hint: EFFORT_LABEL[S.effort] || S.effort, sub: {
       options: ["", ...levels].map((v) => ({ value: v, label: EFFORT_LABEL[v] || v, title: v ? "" : "Use the model's default" })),
       current: S.effort, onPick: (v) => setSetting("effort", v) } },
+    // the CLI's `ultracode` setting: big tasks run as multi-agent workflows, at any effort
+    { value: "ultracode", label: "Ultracode", icon: "rocket", title: "Big tasks run as several agents in parallel (uses many more tokens)",
+      toggle: !!S.ultracode, onToggle: (on) => setSetting("ultracode", on) },
     more.length && { sep: true },
     more.length && { value: "more", label: "More models", sub: {
       options: more.map((m) => ({ value: m.value, label: m.displayName || m.value, title: m.description })), current: cur, onPick: pick } },
@@ -1501,7 +1512,7 @@ function handle(m) {
     case "status": if (turn) working(true, m.text); return;
     case "fileResults": if (mention && m.q === mention.q) { mention.items = m.items; mention.index = 0; renderSlash(); } return;
     case "agentProgress": { const row = stepRow(m.toolUseId); if (row && m.text) row.title = m.text; return; }
-    case "settings": Object.assign(S, { model: m.model, effort: m.effort, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
+    case "settings": Object.assign(S, { model: m.model, effort: m.effort, ultracode: m.ultracode, mode: m.mode, policy: m.policy, agents: m.agents || [] }); return renderToolbar();
     case "init": S.models = m.models; S.commands = m.commands; return renderToolbar();
     case "usage": S.usage = m.usage; S.plan = m.plan; return renderUsage();
     case "showUsage": renderUsage(); usageCard.classList.toggle("hidden"); return;
