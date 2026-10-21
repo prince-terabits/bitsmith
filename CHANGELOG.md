@@ -8,6 +8,8 @@
   and settings, and it shows live as a tab in Bitsmith. Replies stream in, steps show as progress, and Allow / Deny
   buttons answer approvals; **Continue in Bitsmith** opens the chat in full for plans, questions, step diffs, Keep/Undo,
   Restore and History. Needs the Chat panel signed in to GitHub.
+- **New logo:** code brackets with a hammer as the slash, in the activity bar, tabs, status bar, chat and README
+  (screenshots refreshed). MIT licensed.
 
 ## 1.28.1
 
