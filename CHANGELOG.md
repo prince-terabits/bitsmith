@@ -540,3 +540,170 @@ Bug fixes from a review of the extension and the webview:
   message can't be sent twice; the `@` list clears after sending; `/` before commands load no longer breaks Enter;
   inline code shows entity text literally; restore/redo in a hidden chat doesn't overwrite the visible composer;
   switching to a busy or unread tab scrolls to the newest message.
+
+## 1.5.1
+
+- **Fix: chat scrolling.** To make long chats faster, 1.5.0 stopped drawing older messages until you scrolled to them.
+  The panel then had to guess how tall the chat was. The scrollbar came out the wrong size, the chat jumped as
+  messages were drawn, and scrolling could get stuck partway. Every message is drawn again, as before 1.5.0.
+- **Images in steps have a fixed height,** so an image that finishes loading no longer pushes the chat down or stops it
+  from following new messages.
+
+## 1.5.0
+
+- **Images in step results.** Screenshots or images a tool returns show as thumbnails in that step (up to 4). Click one
+  to open it in VS Code.
+- **The message queue survives a reload.** Queued messages are saved with your open tabs and come back after Reload
+  Window. Queued images are not kept.
+- **Export chat:** panel menu → **Export chat** copies the chat as Markdown, saves it to a file, or opens it in an
+  editor.
+- **Removed lines in the editor.** Edited lines show a faded "− was: …" note at the end. Hover it to see the old lines
+  as a diff.
+- **Allow all edits in this chat:** a new button on the edit approval card. It lasts only for that chat.
+- **Commit messages:** a Bitsmith button in Source Control writes a commit message from your changes (staged first,
+  otherwise unstaged) and fills the commit box.
+- **Chat in an editor tab:** **Open in editor** moves the chat into its own editor tab. Closing the tab ends the chat.
+- **Undo covers shell commands.** Restoring a checkpoint also reverts files that commands like `sed` or `printf`
+  changed, not just Claude's own edits. Works in git repositories only. It doesn't cover untracked files that already
+  existed, or files git ignores.
+- **Multi-step redo:** undo several times, then redo them one at a time. Sending a new message clears the redo list.
+- **Polish:** code colours work in light themes, icon buttons have screen-reader labels, and lists, tabs and rows can
+  be reached with the keyboard.
+
+## 1.4.0
+
+- **Queue messages while Claude works.** Press Enter mid-reply and the message waits above the input, marked "next" or
+  "queued #2", with Edit and Remove. It sends when the reply ends. Each chat has its own queue, and **Stop** puts
+  queued messages back into the input instead of sending them.
+- **Open tabs come back after Reload Window,** with their history, on the tab you were looking at. Other tabs only
+  start Claude when you click them.
+- **Files changed lists only workspace files.** Scratch files outside the workspace no longer show up there.
+  Restore checkpoint still reverts them.
+- **Syntax highlighting** in code blocks, using your theme's colours: comments, strings, numbers, keywords, function
+  calls and HTML/XML tags.
+- **`@` file mentions:** type `@` and part of a name to pick a file from a menu, open editors first. Arrow keys plus
+  Enter or Tab add it as a chip.
+- **Context meter:** a small ring next to Send shows how full the conversation is. It turns yellow at 70% and red at
+  90%, and hovering shows the token counts. Click it to compact the conversation. A "Conversation compacted" row
+  shows the before and after sizes, in old chats too.
+- **Notifications:** when a chat you aren't looking at finishes or needs approval, or the panel is hidden, a toast
+  with **Show** takes you to it.
+- **Rename and search chats.** Rename from History, the panel's **…** menu, or by double-clicking a tab. The new name
+  also shows in Claude Code's `/resume`. Typing 3 or more characters in History also searches the text of every chat.
+
+## 1.3.1
+
+- **Fix: run-together text.** When Claude wrote two separate pieces of text with a hidden step between them, they were
+  glued into one paragraph. Each now starts its own paragraph, live and in old chats.
+
+## 1.3.0
+
+- **Several chats at once,** each with its own Claude Code process. With two or more open, a tab strip shows a
+  spinner while a chat works, a dot for an unread reply, and a bell when it is waiting for approval. Chats keep running
+  in the background. An idle chat in the background shuts its process down and picks up where it left off when you
+  return to it.
+- **Background tasks:** a "Running in background" strip above the input lists each background agent or command with a
+  live timer, **Stop** and **Open output**. When a task ends, a row like "✓ Agent … finished" appears in the chat.
+- **Claude's own follow-ups** after a background task finishes show as normal replies, with no empty message bubble.
+- **Sub-agents show their work.** A sub-agent's steps nest under its step, stream in live, and fold away when it
+  finishes. Expanding it shows its prompt and result.
+- **History matches:** old chats show the same nested sub-agent steps and task-finished rows, and the raw task
+  notification text no longer appears as a message from you.
+
+## 1.2.5
+
+- **Fix: Restore checkpoint vanished while another reply was running.** It now stays visible on every reply, failed
+  ones included. It is greyed out until the running reply ends or you stop it.
+
+## 1.2.4
+
+- **No more doubled rows.** A running step, and Thinking, each show once instead of being repeated in the "working"
+  line underneath.
+- **Expandable steps:** click a step to see its full command, its input (sub-agent prompts, search, web and tool
+  arguments) and its output, each with a copy button. Failed steps show the output in red as **Error**. Works in old
+  chats too.
+
+## 1.2.3
+
+- **Click a pasted image to open it** in a VS Code editor tab, in the input box, in sent messages and in old chats.
+
+## 1.2.2
+
+- **Old chats show only the current branch.** When a chat had been rewound in the terminal, the messages it replaced
+  used to appear as well.
+- **Images in re-sent messages:** when the terminal re-sent a message after a rewind with just an `[Image #N]`
+  placeholder, the image from the original paste is shown again.
+
+## 1.2.1
+
+- **Fix: chats missing from Recent chats.** A chat whose first message had a pasted screenshot never got a title, so it
+  wasn't listed. It now shows up.
+- **Old chats show their pasted images** as image chips with the hover preview, instead of `[Image #N]` placeholders.
+
+## 1.2.0
+
+- **Delete chats:** hover a chat in Recent chats or History and click the trash icon, or use **⋯ → Delete Chat** for
+  the open one. Each deletion asks first. It removes the conversation and its saved checkpoints, and goes to your
+  system trash so it can be recovered. History is shared with the CLI, so the chat also leaves `claude --resume`.
+
+## 1.1.4
+
+- **Scrollbars stay out of the way.** The chat shows a thin bar only while you scroll, fading out about a second later.
+  The files-changed list and todos show none.
+
+## 1.1.3
+
+- **Tidier "files changed" list:** one line per file with its name, folder and +/− counts. Long folders are trimmed
+  from the left. Diff, Keep and Undo appear on hover. The list scrolls past about 6 files.
+- **Thinner scrollbar** beside the chat.
+
+## 1.1.2
+
+- **No empty Thinking rows.** A **Thought** row appears only when there is thinking text to read, and it expands to
+  show it.
+- **Step titles aren't cut off;** the command next to them is shortened instead. Claude loading its own tools is no
+  longer shown as a step.
+- **Clearer approval cards:** "Run this command?", "Fetch this page?", "Search the web?", "Start a sub-agent?" and
+  "Use server › tool?".
+- **Fix:** a stray word appeared between the Allow and Reject buttons when "Allow for session" wasn't offered.
+
+## 1.1.1
+
+- **Fix: duplicate file chip.** Attaching the file you already have open showed it twice and sent it to Claude twice.
+  It now appears once. A different file with the same name, or a chip for selected lines, still shows separately.
+
+## 1.1.0
+
+- **New icon:** an anvil with a spark, in the sidebar tab, the status bar, the welcome screen and the extension list.
+- **Usage in the status bar.** The icon shows a percentage once session or weekly usage reaches 70%, and turns yellow at
+  80% and red at 95% or at the limit. Hover for a summary. Click for a card with your plan, session and weekly bars with
+  reset times, and a link to manage usage. The numbers come from what Claude Code reports with each reply, with no
+  extra requests.
+
+## 1.0.0
+
+First release. A chat panel in VS Code's secondary sidebar that drives your local Claude Code CLI on your existing
+login, so your skills, hooks and `CLAUDE.md` all apply.
+
+- **Streaming chat:** replies stream in as they're written. Follow-ups continue the same conversation. Stop keeps the
+  conversation going, and each reply has Copy and Retry.
+- **Current file and attachments:** the current file (and selected lines) shows as a suggestion chip you can include or
+  leave out. Attach files and folders with **+**, by Shift-dragging onto the input, or with **Add to Bitsmith Chat**
+  from the Explorer and editor right-click menus. Paste images, which show as chips with a hover preview.
+- **Pickers:** mode (Agent or Plan), model and effort from your Claude Code, and approvals (Review edits, Ask before
+  edits, or Bypass). `/` lists your slash commands and skills.
+- **Live steps:** each read, search, edit and command gets a readable row, and the rows fold into "N steps in Ns" when
+  the reply ends. Todos show above the input.
+- **Keep/Undo review:** edits apply right away, changed lines are highlighted in the editor with Keep and Undo per
+  change and per file, and the chat lists files changed with diff, Keep and Undo.
+- **Approvals in the chat:** cards to allow or reject commands (also for the whole session), approve or revise plans,
+  and answer Claude's questions.
+- **Restore checkpoint, Redo and Edit message:** restoring from a reply's action row reverts the files Claude edited
+  and rewinds the conversation. Redo brings it back. Editing a sent message restores to that point and resends it.
+  Checkpoints are kept on disk, so they still work after you reopen a chat.
+- **History:** recent chats sit above the input on the welcome screen, and a History button lists all chats for the
+  folder. History is shared with the Claude Code CLI.
+- **Editors stay in sync:** open files are saved before each message, and files Claude changes are reloaded in their
+  editors. If you have unsaved typing in a file, you get a warning instead of having it overwritten.
+- Keyboard shortcuts to focus the chat (`Ctrl+Shift+Alt+I`) and add the selection (`Ctrl+Shift+Alt+L`). Settings:
+  `bitsmith.claudePath` and `bitsmith.defaultPolicy`.
