@@ -2,7 +2,7 @@
   "name": "bitsmith",
   "displayName": "Bitsmith",
   "description": "A coding agent in the secondary sidebar, powered by your local Claude Code CLI and its login.",
-  "version": "1.30.2",
+  "version": "1.30.3",
   "publisher": "prince-terabits",
   "repository": { "type": "git", "url": "https://github.com/prince-terabits/bitsmith.git" },
   "license": "MIT",

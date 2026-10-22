@@ -1841,27 +1841,37 @@ class ChatProvider {
   sessions(limit) {
     let files = [];
     try { files = fs.readdirSync(this.sessionDir()).filter((f) => f.endsWith(".jsonl")); } catch {}
+    const moved = new Map();
     const list = latestCopies(files
       .map((f) => { const file = path.join(this.sessionDir(), f); try { const st = fs.statSync(file); return { id: f.slice(0, -6), file, time: st.mtimeMs, born: st.birthtimeMs }; } catch { return null; } })
       .filter(Boolean)
-      .sort((a, b) => b.time - a.time))
+      .sort((a, b) => b.time - a.time), moved)
       .slice(0, limit)
       .map((s) => ({ ...s, title: sessionTitle(s.file) }))
       .filter((s) => s.title);
     // Chats with the same title (e.g. one conversation carried on in the terminal and here) show their last prompt to tell them apart.
     for (const s of list) if (list.some((o) => o !== s && o.title === s.title)) s.note = lastPrompt(s.file);
+    this.followPins(moved);
     return list;
   }
 
   // Pinned chats (up to 5 per folder) lead the empty screen; Recent lists the rest.
   sessionsMsg() {
     const pick = ({ id, title, time, note }) => ({ id, title, time, note });
+    const recent = this.sessions(11); // first, so the pins follow chats that moved to a newer file
     const pinned = this.pins().map((id) => this.session(id)).filter((s) => s?.title).map(pick);
     const ids = new Set(pinned.map((s) => s.id));
-    return { type: "sessions", items: this.sessions(6 + ids.size).filter((s) => !ids.has(s.id)).map(pick), pinned };
+    return { type: "sessions", items: recent.filter((s) => !ids.has(s.id)).slice(0, 6).map(pick), pinned };
   }
 
   pins() { return this.ws.get("pinnedChats") || []; }
+
+  // A pinned chat that went on in a newer file (compacted, retried, edited) keeps its pin there.
+  followPins(moved) {
+    const pins = this.pins();
+    const next = [...new Set(pins.map((id) => { for (let n = 0; moved.has(id) && n < 100; n++) id = moved.get(id); return id; }))];
+    if (next.join() !== pins.join()) this.ws.update("pinnedChats", next);
+  }
 
   togglePin(id) {
     if (!/^[0-9a-f-]{36}$/i.test(id || "")) return;
@@ -1888,8 +1898,8 @@ class ChatProvider {
     const item = (s, found) => { const on = this.pins().includes(s.id); return { label: (on ? "$(pinned) " : "") + s.title,
       description: (found ? "$(search) in chat · " : "") + new Date(s.time).toLocaleString(), detail: s.note && `Last: ${s.note}`, id: s.id, buttons: [on ? unpin : pin, rename, trash], alwaysShow: found }; };
     const load = () => { // pinned chats first, then the rest newest first
-      const pins = this.pins();
-      recent = [...pins.map((id) => this.session(id)).filter((s) => s?.title), ...this.sessions(60).filter((s) => !pins.includes(s.id))];
+      const list = this.sessions(60), pins = this.pins(); // sessions() first: it moves pins to the chats' newest files
+      recent = [...pins.map((id) => this.session(id)).filter((s) => s?.title), ...list.filter((s) => !pins.includes(s.id))];
       qp.items = recent.map((s) => item(s));
       qp.placeholder = recent.length ? "Resume a chat · type to search titles and messages" : "No past chats for this folder";
     };
@@ -2285,17 +2295,23 @@ function parseUserText(raw) {
 // Given newest first, keeps only the newest file of each chat. A file with the same first prompt is only a copy if it
 // stopped changing before a newer one was created (the chat moved on to the fork); two branches both still written
 // after the split, like the same conversation carried on in the terminal and in Bitsmith, are both kept.
+// `moved` gets each dropped id -> the newer file that replaced it, so a pin can follow the chat.
 // ponytail: only the first 64 KB is read, so a first prompt longer than that (a pasted image) isn't matched.
-function latestCopies(list) {
+function latestCopies(list, moved = new Map()) {
   const firstPrompt = (file) => { try { return readLines(file, 0, 65536).map(parse).find((e) => e && ((e.isCompactSummary && typeof e.message?.content === "string") || userText(e))); } catch {} };
   const withFirst = list.map((s) => [s, firstPrompt(s.file)]);
-  const older = new Set(withFirst.map(([, f]) => f?.isCompactSummary && f.message.content.match(/transcript at: \S*?([0-9a-f-]{36})\.jsonl/)?.[1]));
-  const born = new Map(); // first prompt -> creation times of the newer files (0: the filesystem has none, so any is a copy)
+  const older = new Map(); // id -> the newest file whose compaction summary names it
+  for (const [s, f] of withFirst) {
+    const old = f?.isCompactSummary && f.message.content.match(/transcript at: \S*?([0-9a-f-]{36})\.jsonl/)?.[1];
+    if (old && !older.has(old)) older.set(old, s.id);
+  }
+  const born = new Map(); // first prompt -> the newer files' ids and creation times (0: the filesystem has none, so any is a copy)
   return withFirst.filter(([s, f]) => {
     const newer = born.get(f?.uuid) || [];
-    const copy = older.has(s.id) || newer.some((b) => !b || b >= s.time - 5000);
-    if (f?.uuid) born.set(f.uuid, [...newer, s.born || 0]);
-    return !copy;
+    const by = older.get(s.id) || newer.find((n) => !n.born || n.born >= s.time - 5000)?.id;
+    if (f?.uuid) born.set(f.uuid, [...newer, { id: s.id, born: s.born || 0 }]);
+    if (by) moved.set(s.id, by);
+    return !by;
   }).map(([s]) => s);
 }
 

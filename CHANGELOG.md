@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.30.3
+
+- **Fix:** a pinned chat that was compacted, retried or edited stayed pinned at its old copy, and the conversation
+  carried on as a separate chat with the same name. The pin now moves with the chat, and pins already left behind
+  are moved to the latest copy.
+
 ## 1.30.2
 
 - **Fix:** a Bitsmith chat showed up many times in Claude Code's session list. Each chat now shows there once: the
