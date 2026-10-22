@@ -38,7 +38,7 @@ Bitsmith has no API key of its own. Its only direct request is reading your plan
 ```bash
 git clone https://github.com/prince-terabits/bitsmith.git
 cd bitsmith
-npx --yes @vscode/vsce package --allow-missing-repository --skip-license --no-rewrite-relative-links
+npx --yes @vscode/vsce package
 code --install-extension bitsmith-*.vsix --force
 ```
 
@@ -50,7 +50,7 @@ If `claude` is not on your `PATH`, set **Settings → Bitsmith → Claude Path**
 
 ```bash
 cd bitsmith && git pull
-rm -f *.vsix && npx --yes @vscode/vsce package --allow-missing-repository --skip-license --no-rewrite-relative-links
+rm -f *.vsix && npx --yes @vscode/vsce package
 code --install-extension bitsmith-*.vsix --force
 ```
 

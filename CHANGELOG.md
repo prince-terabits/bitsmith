@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.30.2
+
+- **Fix:** a Bitsmith chat showed up many times in Claude Code's session list. Each chat now shows there once: the
+  older copies a chat leaves behind when it's compacted, retried or edited stay hidden, as they already were in
+  Bitsmith's history.
+
+## 1.30.1
+
+- **Fix:** the logo and screenshots didn't show on the extension page in VS Code and on the Marketplace.
+- **Bitsmith chats show up in Claude Code:** new chats now appear in `claude --resume` and in the Claude Code
+  extension's session list. They used to be hidden there because they were marked as scripted runs.
+
 ## 1.30.0
 
 - **Ultracode switch:** in the model menu, under Effort. Claude splits big tasks across several agents working in

@@ -95,7 +95,7 @@ function autoCompactAt() {
 
 // One long-lived Claude Code CLI process speaking stream-json, resumable by session id.
 class Claude {
-  constructor({ cwd, model, effort, ultracode, resume, resumeAt, agent, dirs = [], onMessage, onExit }) {
+  constructor({ cwd, model, effort, ultracode, resume, resumeAt, agent, dirs = [], hidden, onMessage, onExit }) {
     const cfg = vscode.workspace.getConfiguration("bitsmith");
     const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
@@ -121,7 +121,8 @@ class Claude {
     }
     const compactAt = autoCompactAt();
     // next-message guesses (without it they stop once plan usage passes 75%), and the task tools behind the Todos panel
-    const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1", CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" };
+    const env = { ...process.env, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "1", CLAUDE_CODE_ENABLE_TODO_TOOLS: "1",
+      CLAUDE_CODE_ENTRYPOINT: hidden ? "sdk-cli" : "bitsmith" }; // -p's default "sdk-cli" is hidden by the CLI's /resume and the Claude Code extension
     const settings = {};
     if (compactAt === "off") env.DISABLE_AUTO_COMPACT = "1";
     else {
@@ -388,7 +389,7 @@ class Chat {
       if (meta && id) this.adopt(id, meta, from, at);
       bg.resolve();
     };
-    bg = this.bg = new Claude({ cwd: this.folder, model: s.model, effort: s.effort, resume: from, resumeAt: at, onExit: end,
+    bg = this.bg = new Claude({ cwd: this.folder, model: s.model, effort: s.effort, resume: from, resumeAt: at, hidden: true, onExit: end,
       onMessage: (x) => {
         if (x.type === "system" && x.subtype === "init") id = x.session_id;
         if (x.type === "system" && x.subtype === "compact_boundary") meta = x.compact_metadata || {};
@@ -403,6 +404,8 @@ class Chat {
     if (this.sessionId !== from || this.lastUuid !== at || this.resumeAt || this.tasks.length || this.pending.size || (this.busy && !this.holding)) return;
     this.restart();
     this.sessionId = id;
+    setEntrypoint(path.join(this.sessionDir(), id + ".jsonl"), "bitsmith");
+    setEntrypoint(path.join(this.sessionDir(), from + ".jsonl"), "sdk-cli");
     this.post({ type: "notice", icon: "fold", text: compactText(meta.pre_tokens, meta.post_tokens, "auto") });
     this.setContext(meta.post_tokens || 0, this.model);
     this.p.chatChanged(this);
@@ -414,6 +417,7 @@ class Chat {
   handle(m) {
     if (m.session_id && m.type === "system" && m.subtype === "init") { // a rewind is kept until the CLI has branched, so a restart before that still rewinds
       const moved = m.session_id !== this.sessionId;
+      if (moved && this.sessionId) setEntrypoint(path.join(this.sessionDir(), this.sessionId + ".jsonl"), "sdk-cli"); // the old branch
       this.sessionId = m.session_id;
       this.resumeAt = null;
       if (moved) this.p.chatChanged(this); // a branch has a new id: a reload must reopen it, not the old one
@@ -2293,6 +2297,18 @@ function latestCopies(list) {
     if (f?.uuid) born.set(f.uuid, [...newer, s.born || 0]);
     return !copy;
   }).map(([s]) => s);
+}
+
+// Claude Code's session lists hide a file whose first entry says "sdk-cli". A chat that moved to a new file (a fork,
+// a compaction) hides its old copy there too, as latestCopies does here. The mtime is kept: latestCopies relies on it.
+function setEntrypoint(file, to) {
+  try {
+    const st = fs.statSync(file), text = fs.readFileSync(file, "utf8");
+    const out = text.replace(/"entrypoint":"(bitsmith|sdk-cli)"/, `"entrypoint":"${to}"`);
+    if (out === text) return;
+    fs.writeFileSync(file, out);
+    fs.utimesSync(file, st.atime, st.mtime);
+  } catch {}
 }
 
 function readLines(file, from, size) {
